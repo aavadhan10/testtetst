@@ -38,16 +38,34 @@ class CapTableAuditor:
             ext = file.name.split('.')[-1].lower()
             try:
                 if ext == 'csv':
-                    df = pd.read_csv(file)
+                    # Try different CSV parsing options
+                    try:
+                        df = pd.read_csv(file)
+                    except:
+                        # Try with different separator
+                        file.seek(0)
+                        try:
+                            df = pd.read_csv(file, sep=';')
+                        except:
+                            # Try with different quote handling
+                            file.seek(0)
+                            try:
+                                df = pd.read_csv(file, quotechar='"', quoting=1)
+                            except:
+                                # Last resort - skip bad lines
+                                file.seek(0)
+                                df = pd.read_csv(file, error_bad_lines=False, warn_bad_lines=True)
                 elif ext in ['xls', 'xlsx']:
                     df = pd.read_excel(file)
                 else:
                     continue
+                
                 df.columns = df.columns.str.strip().str.lower()
                 dfs.append(df)
                 st.success(f"✅ {file.name} ({len(df)} rows)")
             except Exception as e:
                 st.error(f"❌ {file.name}: {e}")
+                st.info("💡 Try saving as Excel (.xlsx) format if CSV continues to fail")
         return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
     def analyze_with_claude(self, text, doc_name):
@@ -205,21 +223,49 @@ def main():
             st.dataframe(cap_df.head())
         
         # Analyze legal docs
+        st.subheader("📑 Analyzing Legal Documents")
         legal_analysis = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
         for i, file in enumerate(legal_files):
-            st.write(f"📄 {file.name}")
-            text = auditor.extract_text(file)
+            # Update status
+            status_text.write(f"🔄 Processing document {i+1} of {len(legal_files)}: **{file.name}**")
+            
+            with st.spinner(f"Extracting text from {file.name}..."):
+                text = auditor.extract_text(file)
+            
             if text:
-                analysis = auditor.analyze_with_claude(text, file.name)
+                with st.spinner(f"AI analyzing {file.name}..."):
+                    analysis = auditor.analyze_with_claude(text, file.name)
+                
                 if "error" not in analysis:
                     legal_analysis.append(analysis)
-                    st.success("✅")
+                    st.success(f"✅ Successfully analyzed {file.name}")
+                    
+                    # Show grants found
+                    grants_found = len(analysis.get('grants', []))
+                    if grants_found > 0:
+                        st.info(f"📋 Found {grants_found} grant(s) in {file.name}")
                 else:
-                    st.error(f"❌ {analysis['error']}")
+                    st.error(f"❌ Error analyzing {file.name}: {analysis['error']}")
+            else:
+                st.warning(f"⚠️ No text extracted from {file.name}")
+            
+            # Update progress
+            progress_bar.progress((i + 1) / len(legal_files))
         
+        # Clear status text when done
+        status_text.empty()
+        
+        if legal_analysis:
+            total_grants = sum(len(doc.get("grants", [])) for doc in legal_analysis)
+            st.success(f"🎉 Analysis complete! Extracted **{total_grants} total grants** from **{len(legal_analysis)} documents**")
         # Compare
         if legal_analysis:
-            result = auditor.compare_with_claude(cap_df, legal_analysis)
+            st.subheader("🔍 Comparing Cap Table vs Legal Documents")
+            with st.spinner("AI performing detailed discrepancy analysis..."):
+                result = auditor.compare_with_claude(cap_df, legal_analysis)
             
             if "error" not in result:
                 discrepancies = result.get("discrepancies", [])
