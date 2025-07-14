@@ -162,25 +162,41 @@ IMPORTANT: Return ONLY valid JSON. Be extremely specific with vesting schedules.
     def compare_with_claude(self, cap_df, legal_docs):
         if not self.client: return {"error": "No client"}
         
-        prompt = f"""You are a lawyer conducting a capitalization table tie out. Compare EVERY SINGLE DETAIL between cap table and legal documents.
+        prompt = f"""You are a lawyer conducting a capitalization table tie out using this professional due diligence checklist:
 
-FIND ALL ISSUES - DO NOT STOP AT ONE TYPE. For each stockholder, check ALL of these and report EVERY discrepancy found:
+**CAPITALIZATION AUDIT CHECKLIST:**
+☐ Review all cap-related materials against cap table: stock, options, warrants, convertible notes, SAFEs
+☐ Was stock issuance approved by the Board and reflected correctly on the cap table?
+☐ Does issuance comply with governance documents (stockholder approval, preemptive rights)?
+☐ Is there an agreement (stock purchase agreement, option exercise form)?
+☐ Does it match the cap table in shares/name?
+☐ Are transfers properly documented and compliant with restrictions?
+☐ Is there any vesting/acceleration? Note non-standard terms
+☐ Did Board approve grant (exercise price, number of shares, vesting)?
+☐ Was a 409A valuation in place (within 1-year safe harbor)?
+☐ Any vesting or acceleration? Note non-standard terms (anything that's not 4 year vest one year cliff for employees)
+☐ Do grant details in Board approval match cap table?
+☐ Do grant details in stock option agreement match cap table?
+☐ Was warrant issuance Board-approved and reflected on cap table?
+☐ Does warrant match cap table in number/type/name?
+☐ Are any shareholder/founder agreements in place?
+☐ Identify equity-related side letters or contracts
+☐ Confirm options can be cashed-out in sale
+
+Apply this checklist systematically. FIND ALL ISSUES - DO NOT STOP AT ONE TYPE. For each stockholder, check ALL of these and report EVERY discrepancy found:
 
 1. SHARE COUNT MISMATCHES (exact numbers must match)
-2. GRANT DATE MISMATCHES (exact dates must match - check character by character)
+2. GRANT DATE MISMATCHES (exact dates must match - verify Board approval dates)
 3. VESTING START DATE MISMATCHES (exact dates must match)
-4. VESTING SCHEDULE MISMATCHES (exact wording must match - "1/48th monthly" ≠ "monthly vesting")
-5. SECURITY TYPE MISMATCHES (options vs shares vs warrants)
-6. EXERCISE PRICE MISMATCHES
-7. MISSING ENTRIES (in cap table but not legal docs, or vice versa)
-8. FORMATTING/DETAIL DIFFERENCES (generic vs specific descriptions)
+4. VESTING SCHEDULE MISMATCHES (flag non-standard terms - anything not "4 year vest, 1 year cliff" for employees)
+5. SECURITY TYPE MISMATCHES (options vs shares vs warrants vs SAFEs)
+6. EXERCISE PRICE MISMATCHES (verify 409A compliance)
+7. BOARD APPROVAL MISMATCHES (grant details in board approval vs cap table)
+8. MISSING AGREEMENTS (cap table shows grant but no supporting legal document)
+9. MISSING CAP TABLE ENTRIES (legal docs show grant but not on cap table)
+10. GOVERNANCE COMPLIANCE ISSUES (approvals, authorizations, restrictions)
 
-IMPORTANT: Report MULTIPLE issues per stockholder if they exist. Do not limit to one issue per person.
-
-Examples of multiple issues for same person:
-- John Doe: Grant date wrong AND vesting schedule too generic AND share count off by 500
-- Jane Smith: Missing from cap table entirely 
-- Bob Johnson: Exercise price missing AND vesting start date wrong
+IMPORTANT: Report MULTIPLE issues per stockholder if they exist. Apply the full due diligence checklist.
 
 CAPITALIZATION TABLE:
 {cap_df.head(20).to_dict('records')}
@@ -188,27 +204,30 @@ CAPITALIZATION TABLE:
 LEGAL DOCUMENTS:
 {legal_docs}
 
-Return JSON with ALL discrepancies found (expect 10-20+ issues typically):
+Return JSON with ALL discrepancies found using due diligence framework:
 {{
   "discrepancies": [
     {{
       "stockholder": "Name",
-      "discrepancy_type": "shares_mismatch/grant_date_mismatch/vesting_schedule_mismatch/vesting_start_mismatch/missing_detail/etc",
+      "discrepancy_type": "shares_mismatch/grant_date_mismatch/vesting_schedule_mismatch/board_approval_mismatch/missing_agreement/governance_issue/etc",
+      "due_diligence_item": "Which checklist item this relates to",
       "specific_issue": "Extremely specific description of what doesn't match",
       "cap_table_value": "exact value from cap table",
       "legal_document_value": "exact value from legal document", 
       "source_document": "document name",
       "severity": "high/medium/low",
-      "legal_text_evidence": "exact text from legal document proving the correct value"
+      "legal_text_evidence": "exact text from legal document proving the correct value",
+      "compliance_risk": "What legal/compliance risk this creates"
     }}
   ],
   "summary": {{
     "total_discrepancies": 0,
-    "assessment": "detailed assessment noting that most cap tables have 10-20+ issues when compared forensically"
+    "checklist_completion": "% of due diligence items that could be verified",
+    "assessment": "detailed assessment using due diligence framework"
   }}
 }}
 
-Be exhaustive. Check every stockholder against every field. Report everything that doesn't match perfectly."""
+Be exhaustive and apply professional due diligence standards. Check every stockholder against every checklist item."""
 
         try:
             response = self.client.messages.create(
