@@ -53,15 +53,37 @@ class CapTableAuditor:
     def analyze_with_claude(self, text, doc_name):
         if not self.client: return {"error": "No client"}
         
-        prompt = f"""Extract grant info from this legal document:
+        prompt = f"""You are a lawyer conducting a capitalization table tie out of a company on behalf of an investor.
 
-{text[:8000]}
+Analyze this legal document and extract ALL grant information:
 
-Return JSON:
+Document: {doc_name}
+Content: {text[:8000]}
+
+Extract for each grant:
+- Stockholder/Grantee name
+- Number of shares/options granted
+- Grant date (for board consents: the LAST date any director signed the consent, or the explicitly written effective date of the board approval. For board minutes: the date the meeting was held)
+- Vesting start date
+- Vesting schedule details
+- Security type (options, shares, warrants, etc.)
+- Exercise price if applicable
+
+Return JSON format:
 {{
   "grants": [
-    {{"stockholder": "Name", "shares": "123", "grant_date": "2024-01-01", "vesting_start": "2024-01-01"}}
-  ]
+    {{
+      "stockholder": "Full Name",
+      "shares": "number",
+      "grant_date": "YYYY-MM-DD",
+      "vesting_start": "YYYY-MM-DD",
+      "vesting_schedule": "description",
+      "security_type": "options/shares/warrant",
+      "exercise_price": "price if applicable",
+      "document_reference": "specific section reference"
+    }}
+  ],
+  "document_type": "board_consent/board_minutes/option_agreement/share_purchase_agreement/warrant/note/other"
 }}"""
 
         try:
@@ -79,17 +101,42 @@ Return JSON:
     def compare_with_claude(self, cap_df, legal_docs):
         if not self.client: return {"error": "No client"}
         
-        prompt = f"""Compare cap table vs legal docs. Find discrepancies:
+        prompt = f"""You are a lawyer conducting a capitalization table tie out of a company on behalf of an investor.
 
-CAP TABLE: {cap_df.head(20).to_dict('records')}
-LEGAL DOCS: {legal_docs}
+1. Compare the company's capitalization table against the legal documents. The legal documents are the ultimate source of truth, and you are auditing the capitalization table to make sure it reflects the legal documents.
 
-Return JSON:
+2. For each stockholder's grant in the capitalization table, confirm that the grant details, including the grant date, number of shares issued, vesting start date, and vesting schedule match what is approved in the corresponding board consent, board minutes, or other grant documents, including any share purchase agreement, option grant agreement, warrant, note, or other convertible securities.
+
+3. The grant date in any board consent is the last date a director signed the consent, or the explicitly written effective date of the board approval. The grant date in any board minutes is the date the meeting was held.
+
+4. Please list out all discrepancies, and provide a brief summary of each discrepancy, including which stockholder is impacted, what is incorrect on the capitalization table, and what it should be based on the legal documents, making reference to the specific legal document.
+
+CAPITALIZATION TABLE:
+{cap_df.head(20).to_dict('records')}
+
+LEGAL DOCUMENTS ANALYSIS:
+{legal_docs}
+
+Return JSON format:
 {{
   "discrepancies": [
-    {{"stockholder": "Name", "issue": "description", "severity": "high/medium/low"}}
+    {{
+      "stockholder": "Name",
+      "discrepancy_type": "shares_mismatch/grant_date_mismatch/vesting_start_mismatch/missing_legal_doc/missing_cap_entry",
+      "description": "Brief summary of discrepancy with specific details",
+      "cap_table_value": "what the cap table shows",
+      "legal_document_value": "what the legal document shows",
+      "source_document": "specific legal document name",
+      "severity": "high/medium/low"
+    }}
   ],
-  "summary": {{"total": 0}}
+  "summary": {{
+    "total_discrepancies": 0,
+    "high_severity_count": 0,
+    "medium_severity_count": 0,
+    "low_severity_count": 0,
+    "overall_assessment": "Summary of cap table accuracy"
+  }}
 }}"""
 
         try:
@@ -113,9 +160,9 @@ def main():
     # File uploads
     col1, col2 = st.columns(2)
     with col1:
-        cap_files = st.file_uploader("Cap Table", type=['csv','xlsx','xls'], accept_multiple_files=True)
+        cap_files = st.file_uploader("Cap Table Files", type=['csv','xlsx','xls'], accept_multiple_files=True)
     with col2:
-        legal_files = st.file_uploader("Legal Docs", type=['pdf','docx','doc','xlsx','csv'], accept_multiple_files=True)
+        legal_files = st.file_uploader("Legal Documents", type=['pdf','doc','docx','xlsx','xls','csv'], accept_multiple_files=True)
     
     if cap_files and legal_files:
         # Load cap table
@@ -149,8 +196,25 @@ def main():
                 if discrepancies:
                     for d in discrepancies:
                         severity = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(d.get("severity"), "⚪")
-                        with st.expander(f"{severity} {d.get('stockholder', 'Unknown')}"):
-                            st.write(d.get('issue', 'No details'))
+                        with st.expander(f"{severity} {d.get('stockholder', 'Unknown')} - {d.get('discrepancy_type', 'Issue')}"):
+                            st.write(f"**Description:** {d.get('description', 'No details')}")
+                            st.write(f"**Cap Table Value:** {d.get('cap_table_value', 'N/A')}")
+                            st.write(f"**Legal Document Value:** {d.get('legal_document_value', 'N/A')}")
+                            st.write(f"**Source Document:** {d.get('source_document', 'N/A')}")
+                    
+                    # Show summary metrics
+                    summary = result.get("summary", {})
+                    if summary:
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("High Severity", summary.get("high_severity_count", 0))
+                        with col2:
+                            st.metric("Medium Severity", summary.get("medium_severity_count", 0))
+                        with col3:
+                            st.metric("Low Severity", summary.get("low_severity_count", 0))
+                        
+                        if summary.get("overall_assessment"):
+                            st.info(f"**Assessment:** {summary['overall_assessment']}")
                     
                     # Download
                     csv = pd.DataFrame(discrepancies).to_csv(index=False)
