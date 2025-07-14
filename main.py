@@ -71,78 +71,81 @@ class CapTableAuditor:
     def analyze_with_claude(self, text, doc_name):
         if not self.client: return {"error": "No client"}
         
-        # Clean the text to avoid JSON parsing issues
-        clean_text = text.replace('"', "'").replace('\n', ' ').replace('\r', ' ')
-        clean_text = ' '.join(clean_text.split())  # Remove extra whitespace
+        # More aggressive text cleaning
+        import re
+        clean_text = re.sub(r'[^\w\s\-\.\,\:\;\(\)\[\]\/]', ' ', text)  # Remove special chars
+        clean_text = ' '.join(clean_text.split())  # Normalize whitespace
         
-        prompt = f"""You are a lawyer conducting a capitalization table tie out of a company on behalf of an investor.
-
-Analyze this legal document and extract ALL grant information with EXACT TEXT CITATIONS:
+        prompt = f"""You are a lawyer conducting a capitalization table tie out. Analyze this document and extract grant information.
 
 Document: {doc_name}
-Content: {clean_text[:10000]}
+Content: {clean_text[:8000]}
 
-For each grant found, extract:
-- Stockholder/Grantee name
-- Number of shares/options granted
-- Grant date (for board consents: the LAST date any director signed the consent, or the explicitly written effective date of the board approval. For board minutes: the date the meeting was held)
-- Vesting start date
-- Vesting schedule details
-- Security type (options, shares, warrants, etc.)
-- Exercise price if applicable
+IMPORTANT: Return ONLY valid JSON. No extra text before or after. Use simple strings without quotes inside values.
 
-CRITICAL: For each piece of information extracted, provide the EXACT TEXT from the document where you found it, including surrounding context. Replace any quotation marks with single quotes in your response.
-
-Return JSON format:
 {{
   "grants": [
     {{
-      "stockholder": "Full Name",
-      "shares": "number",
-      "grant_date": "YYYY-MM-DD",
-      "vesting_start": "YYYY-MM-DD",
-      "vesting_schedule": "description",
-      "security_type": "options/shares/warrant",
-      "exercise_price": "price if applicable",
-      "text_evidence": {{
-        "stockholder_text": "exact text mentioning the stockholder name",
-        "shares_text": "exact text mentioning the share count",
-        "grant_date_text": "exact text mentioning the grant date or signature dates",
-        "vesting_start_text": "exact text mentioning vesting start date",
-        "vesting_schedule_text": "exact text describing vesting schedule"
-      }},
-      "document_reference": "specific section, page, or paragraph reference"
+      "stockholder": "Name",
+      "shares": "123",
+      "grant_date": "2024-01-01",
+      "vesting_start": "2024-01-01",
+      "security_type": "options",
+      "source_text": "relevant text from document"
     }}
   ],
-  "document_type": "board_consent/board_minutes/option_agreement/share_purchase_agreement/warrant/note/other"
-}}
-
-Be extremely precise and quote the exact text where each piece of information was found. Use only single quotes in your response, never double quotes."""
+  "document_type": "board_consent"
+}}"""
 
         try:
             response = self.client.messages.create(
                 model="claude-3-sonnet-20240229",
-                max_tokens=3000,
+                max_tokens=2000,
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}]
             )
-            response_text = response.content[0].text
             
-            # More robust JSON extraction
-            start = response_text.find('{')
-            end = response_text.rfind('}') + 1
+            response_text = response.content[0].text.strip()
             
-            if start != -1 and end != -1:
-                json_str = response_text[start:end]
-                # Clean up any problematic characters
-                json_str = json_str.replace("'", '"')  # Convert single quotes back to double quotes for JSON
-                return json.loads(json_str)
-            else:
-                return {"error": "Could not find valid JSON in response"}
+            # Find JSON boundaries more carefully
+            json_start = -1
+            json_end = -1
+            brace_count = 0
+            
+            for i, char in enumerate(response_text):
+                if char == '{':
+                    if json_start == -1:
+                        json_start = i
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0 and json_start != -1:
+                        json_end = i + 1
+                        break
+            
+            if json_start != -1 and json_end != -1:
+                json_str = response_text[json_start:json_end]
                 
-        except json.JSONDecodeError as e:
-            return {"error": f"JSON parsing error: {str(e)}"}
+                # Additional cleaning
+                json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)  # Remove control chars
+                json_str = json_str.replace('\n', ' ').replace('\r', ' ')
+                
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    # If JSON still fails, return a basic structure
+                    st.warning(f"JSON parsing failed for {doc_name}, using fallback extraction")
+                    return {
+                        "grants": [],
+                        "document_type": "unknown",
+                        "error_details": f"Could not parse JSON: {str(e)}",
+                        "raw_response": response_text[:500]
+                    }
+            else:
+                return {"error": "No valid JSON structure found", "raw_response": response_text[:500]}
+                
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"API call failed: {str(e)}"}
 
     def compare_with_claude(self, cap_df, legal_docs):
         if not self.client: return {"error": "No client"}
