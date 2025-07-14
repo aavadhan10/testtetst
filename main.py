@@ -111,7 +111,7 @@ IMPORTANT: Return ONLY valid JSON. Be extremely specific with vesting schedules.
 
         try:
             response = self.client.messages.create(
-                model="claude-3-sonnet-20240229",
+                model="claude-3-5-sonnet-20241022",
                 max_tokens=2000,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}]
@@ -164,12 +164,19 @@ IMPORTANT: Return ONLY valid JSON. Be extremely specific with vesting schedules.
         
         prompt = f"""You are a lawyer conducting a capitalization table tie out. Compare EVERY SPECIFIC DETAIL between cap table and legal documents.
 
-CRITICAL: Flag ANY discrepancy, no matter how small:
-- Share counts must match EXACTLY
-- Grant dates must match EXACTLY  
+CRITICAL: Flag ANY discrepancy, no matter how small. Check EVERY field for EVERY stockholder:
+- Share counts must match EXACTLY (10000 ≠ 10,000 if formatting differs)
+- Grant dates must match EXACTLY down to the day (2024-01-15 ≠ 2024-01-16)
 - Vesting schedules must match EXACTLY (e.g., if legal doc says "1/48th monthly over 4 years" but cap table says "4 year vest", that's a discrepancy)
-- Vesting start dates must match EXACTLY
+- Vesting start dates must match EXACTLY 
 - Any missing details in cap table vs legal docs
+- Date format differences (Jan 15 2024 vs 2024-01-15 - flag if different formats might hide date errors)
+
+EXTRA ATTENTION TO DATE MISMATCHES: 
+- Compare each grant date character by character
+- Look for off-by-one date errors (common mistake)
+- Check if cap table uses different date formats that might hide errors
+- Verify signature dates vs grant dates carefully
 
 CAPITALIZATION TABLE:
 {cap_df.head(20).to_dict('records')}
@@ -209,7 +216,7 @@ Be forensically detailed. Every difference matters for legal compliance."""
 
         try:
             response = self.client.messages.create(
-                model="claude-3-sonnet-20240229",
+                model="claude-3-5-sonnet-20241022",
                 max_tokens=4000,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}]
