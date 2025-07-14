@@ -162,21 +162,25 @@ IMPORTANT: Return ONLY valid JSON. Be extremely specific with vesting schedules.
     def compare_with_claude(self, cap_df, legal_docs):
         if not self.client: return {"error": "No client"}
         
-        prompt = f"""You are a lawyer conducting a capitalization table tie out. Compare EVERY SPECIFIC DETAIL between cap table and legal documents.
+        prompt = f"""You are a lawyer conducting a capitalization table tie out. Compare EVERY SINGLE DETAIL between cap table and legal documents.
 
-CRITICAL: Flag ANY discrepancy, no matter how small. Check EVERY field for EVERY stockholder:
-- Share counts must match EXACTLY (10000 ≠ 10,000 if formatting differs)
-- Grant dates must match EXACTLY down to the day (2024-01-15 ≠ 2024-01-16)
-- Vesting schedules must match EXACTLY (e.g., if legal doc says "1/48th monthly over 4 years" but cap table says "4 year vest", that's a discrepancy)
-- Vesting start dates must match EXACTLY 
-- Any missing details in cap table vs legal docs
-- Date format differences (Jan 15 2024 vs 2024-01-15 - flag if different formats might hide date errors)
+FIND ALL ISSUES - DO NOT STOP AT ONE TYPE. For each stockholder, check ALL of these and report EVERY discrepancy found:
 
-EXTRA ATTENTION TO DATE MISMATCHES: 
-- Compare each grant date character by character
-- Look for off-by-one date errors (common mistake)
-- Check if cap table uses different date formats that might hide errors
-- Verify signature dates vs grant dates carefully
+1. SHARE COUNT MISMATCHES (exact numbers must match)
+2. GRANT DATE MISMATCHES (exact dates must match - check character by character)
+3. VESTING START DATE MISMATCHES (exact dates must match)
+4. VESTING SCHEDULE MISMATCHES (exact wording must match - "1/48th monthly" ≠ "monthly vesting")
+5. SECURITY TYPE MISMATCHES (options vs shares vs warrants)
+6. EXERCISE PRICE MISMATCHES
+7. MISSING ENTRIES (in cap table but not legal docs, or vice versa)
+8. FORMATTING/DETAIL DIFFERENCES (generic vs specific descriptions)
+
+IMPORTANT: Report MULTIPLE issues per stockholder if they exist. Do not limit to one issue per person.
+
+Examples of multiple issues for same person:
+- John Doe: Grant date wrong AND vesting schedule too generic AND share count off by 500
+- Jane Smith: Missing from cap table entirely 
+- Bob Johnson: Exercise price missing AND vesting start date wrong
 
 CAPITALIZATION TABLE:
 {cap_df.head(20).to_dict('records')}
@@ -184,20 +188,12 @@ CAPITALIZATION TABLE:
 LEGAL DOCUMENTS:
 {legal_docs}
 
-For EACH discrepancy, be extremely specific about what doesn't match:
-
-Examples of discrepancies to catch:
-- Legal doc: "10,000 shares" vs Cap table: "9,500 shares" 
-- Legal doc: "1/48th monthly over 4 years with 1-year cliff" vs Cap table: "4 year vesting"
-- Legal doc: "Grant date: 2024-01-15" vs Cap table: "2024-01-10"
-- Legal doc shows detailed vesting but cap table is blank/generic
-
-Return JSON:
+Return JSON with ALL discrepancies found (expect 10-20+ issues typically):
 {{
   "discrepancies": [
     {{
       "stockholder": "Name",
-      "discrepancy_type": "shares_mismatch/grant_date_mismatch/vesting_schedule_mismatch/vesting_start_mismatch/missing_detail",
+      "discrepancy_type": "shares_mismatch/grant_date_mismatch/vesting_schedule_mismatch/vesting_start_mismatch/missing_detail/etc",
       "specific_issue": "Extremely specific description of what doesn't match",
       "cap_table_value": "exact value from cap table",
       "legal_document_value": "exact value from legal document", 
@@ -208,11 +204,11 @@ Return JSON:
   ],
   "summary": {{
     "total_discrepancies": 0,
-    "assessment": "detailed assessment"
+    "assessment": "detailed assessment noting that most cap tables have 10-20+ issues when compared forensically"
   }}
 }}
 
-Be forensically detailed. Every difference matters for legal compliance."""
+Be exhaustive. Check every stockholder against every field. Report everything that doesn't match perfectly."""
 
         try:
             response = self.client.messages.create(
