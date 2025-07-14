@@ -76,22 +76,34 @@ class CapTableAuditor:
         clean_text = re.sub(r'[^\w\s\-\.\,\:\;\(\)\[\]\/]', ' ', text)  # Remove special chars
         clean_text = ' '.join(clean_text.split())  # Normalize whitespace
         
-        prompt = f"""You are a lawyer conducting a capitalization table tie out. Analyze this document and extract grant information.
+        prompt = f"""You are a lawyer conducting a capitalization table tie out. Analyze this document and extract EXACT grant details.
 
 Document: {doc_name}
 Content: {clean_text[:8000]}
 
-IMPORTANT: Return ONLY valid JSON. No extra text before or after. Use simple strings without quotes inside values.
+Extract PRECISE details for each grant:
+- Stockholder name
+- EXACT share count (e.g., "10000", "5000")
+- Grant date (board consent: LAST signature date; board minutes: meeting date)
+- Vesting start date
+- DETAILED vesting schedule (e.g., "1/48th monthly over 4 years", "25% after 1 year then 1/36th monthly", "100% immediate")
+- Security type
+- Exercise price if applicable
+- Any other specific terms
+
+IMPORTANT: Return ONLY valid JSON. Be extremely specific with vesting schedules.
 
 {{
   "grants": [
     {{
-      "stockholder": "Name",
-      "shares": "123",
-      "grant_date": "2024-01-01",
-      "vesting_start": "2024-01-01",
-      "security_type": "options",
-      "source_text": "relevant text from document"
+      "stockholder": "Full Name",
+      "shares": "exact_number",
+      "grant_date": "YYYY-MM-DD",
+      "vesting_start": "YYYY-MM-DD",
+      "vesting_schedule_detailed": "exact vesting description from document",
+      "security_type": "options/shares/warrant",
+      "exercise_price": "price_if_applicable",
+      "source_text": "relevant text from document showing these details"
     }}
   ],
   "document_type": "board_consent"
@@ -150,74 +162,91 @@ IMPORTANT: Return ONLY valid JSON. No extra text before or after. Use simple str
     def compare_with_claude(self, cap_df, legal_docs):
         if not self.client: return {"error": "No client"}
         
-        prompt = f"""You are a lawyer conducting a capitalization table tie out of a company on behalf of an investor.
+        prompt = f"""You are a lawyer conducting a capitalization table tie out. Compare EVERY SPECIFIC DETAIL between cap table and legal documents.
 
-1. Compare the company's capitalization table against the legal documents. The legal documents are the ultimate source of truth, and you are auditing the capitalization table to make sure it reflects the legal documents.
-
-2. For each stockholder's grant in the capitalization table, confirm that the grant details, including the grant date, number of shares issued, vesting start date, and vesting schedule match what is approved in the corresponding board consent, board minutes, or other grant documents.
-
-3. The grant date in any board consent is the last date a director signed the consent, or the explicitly written effective date of the board approval. The grant date in any board minutes is the date the meeting was held.
-
-4. For EACH discrepancy found, provide:
-   - EXACT comparison showing what cap table says vs. what legal document says
-   - SPECIFIC TEXT QUOTES from the legal document proving the correct information
-   - DETAILED explanation of why this is incorrect
-   - SPECIFIC line/section reference where the correct information was found
+CRITICAL: Flag ANY discrepancy, no matter how small:
+- Share counts must match EXACTLY
+- Grant dates must match EXACTLY  
+- Vesting schedules must match EXACTLY (e.g., if legal doc says "1/48th monthly over 4 years" but cap table says "4 year vest", that's a discrepancy)
+- Vesting start dates must match EXACTLY
+- Any missing details in cap table vs legal docs
 
 CAPITALIZATION TABLE:
 {cap_df.head(20).to_dict('records')}
 
-LEGAL DOCUMENTS ANALYSIS:
+LEGAL DOCUMENTS:
 {legal_docs}
 
-Return JSON format with EXTREMELY DETAILED discrepancy analysis:
+For EACH discrepancy, be extremely specific about what doesn't match:
+
+Examples of discrepancies to catch:
+- Legal doc: "10,000 shares" vs Cap table: "9,500 shares" 
+- Legal doc: "1/48th monthly over 4 years with 1-year cliff" vs Cap table: "4 year vesting"
+- Legal doc: "Grant date: 2024-01-15" vs Cap table: "2024-01-10"
+- Legal doc shows detailed vesting but cap table is blank/generic
+
+Return JSON:
 {{
   "discrepancies": [
     {{
       "stockholder": "Name",
-      "discrepancy_type": "shares_mismatch/grant_date_mismatch/vesting_start_mismatch/missing_legal_doc/missing_cap_entry",
-      "detailed_description": "Comprehensive explanation of the specific discrepancy with exact numbers and dates",
-      "cap_table_shows": {{
-        "shares": "exact value from cap table",
-        "grant_date": "exact date from cap table",
-        "vesting_start": "exact date from cap table"
-      }},
-      "legal_document_shows": {{
-        "shares": "exact value from legal doc",
-        "grant_date": "exact date from legal doc",
-        "vesting_start": "exact date from legal doc"
-      }},
-      "legal_document_evidence": {{
-        "exact_text_quote": "word-for-word text from legal document showing correct information",
-        "document_section": "specific section, page, or paragraph where this was found",
-        "context": "surrounding text for context"
-      }},
-      "source_document": "specific legal document name",
-      "calculation_details": "if applicable, show how grant date was determined (e.g., 'Latest signature date: John Smith signed 2024-01-15, Jane Doe signed 2024-01-18, therefore grant date is 2024-01-18')",
+      "discrepancy_type": "shares_mismatch/grant_date_mismatch/vesting_schedule_mismatch/vesting_start_mismatch/missing_detail",
+      "specific_issue": "Extremely specific description of what doesn't match",
+      "cap_table_value": "exact value from cap table",
+      "legal_document_value": "exact value from legal document", 
+      "source_document": "document name",
       "severity": "high/medium/low",
-      "correction_required": "exactly what needs to be changed in the cap table"
+      "legal_text_evidence": "exact text from legal document proving the correct value"
     }}
   ],
   "summary": {{
     "total_discrepancies": 0,
-    "high_severity_count": 0,
-    "medium_severity_count": 0,
-    "low_severity_count": 0,
-    "overall_assessment": "Detailed summary of cap table accuracy with specific issues highlighted"
+    "assessment": "detailed assessment"
   }}
 }}
 
-Be forensically detailed in your analysis. Quote exact text and provide specific evidence for every discrepancy."""
+Be forensically detailed. Every difference matters for legal compliance."""
 
         try:
             response = self.client.messages.create(
                 model="claude-3-sonnet-20240229",
                 max_tokens=4000,
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}]
             )
-            text = response.content[0].text
-            start, end = text.find('{'), text.rfind('}') + 1
-            return json.loads(text[start:end]) if start != -1 else {"error": "No JSON"}
+            response_text = response.content[0].text.strip()
+            
+            # Same robust JSON extraction as analyze_with_claude
+            json_start = -1
+            json_end = -1
+            brace_count = 0
+            
+            for i, char in enumerate(response_text):
+                if char == '{':
+                    if json_start == -1:
+                        json_start = i
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0 and json_start != -1:
+                        json_end = i + 1
+                        break
+            
+            if json_start != -1 and json_end != -1:
+                json_str = response_text[json_start:json_end]
+                
+                # Additional cleaning
+                import re
+                json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)
+                json_str = json_str.replace('\n', ' ').replace('\r', ' ')
+                
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    return {"error": f"JSON parsing error in comparison: {str(e)}", "raw_response": response_text[:500]}
+            else:
+                return {"error": "No valid JSON found in comparison response", "raw_response": response_text[:500]}
+                
         except Exception as e:
             return {"error": str(e)}
 
@@ -320,52 +349,30 @@ def main():
                             with st.expander(f"{severity} Issue {i}: {d.get('stockholder', 'Unknown')} - {d.get('discrepancy_type', 'Issue')}", expanded=d.get('severity') == 'high'):
                                 
                                 # Main discrepancy description
-                                st.markdown(f"**📋 Description:** {d.get('detailed_description', d.get('description', 'No details'))}")
+                                st.markdown(f"**🎯 Specific Issue:** {d.get('specific_issue', d.get('detailed_description', d.get('description', 'No details')))}")
                                 
-                                # Side-by-side comparison
+                                # Side-by-side comparison with exact values
                                 col1, col2 = st.columns(2)
                                 with col1:
                                     st.markdown("**📊 Cap Table Shows:**")
-                                    cap_shows = d.get('cap_table_shows', {})
-                                    if cap_shows:
-                                        for key, value in cap_shows.items():
-                                            st.write(f"• {key}: `{value}`")
-                                    else:
-                                        st.write(f"• {d.get('cap_table_value', 'N/A')}")
+                                    st.code(d.get('cap_table_value', 'N/A'), language=None)
                                 
                                 with col2:
                                     st.markdown("**📄 Legal Document Shows:**")
-                                    legal_shows = d.get('legal_document_shows', {})
-                                    if legal_shows:
-                                        for key, value in legal_shows.items():
-                                            st.write(f"• {key}: `{value}`")
-                                    else:
-                                        st.write(f"• {d.get('legal_document_value', 'N/A')}")
+                                    st.code(d.get('legal_document_value', 'N/A'), language=None)
                                 
-                                # Legal evidence section
-                                evidence = d.get('legal_document_evidence', {})
-                                if evidence:
+                                # Legal evidence
+                                if d.get('legal_text_evidence'):
                                     st.markdown("**🔍 Legal Document Evidence:**")
-                                    
-                                    if evidence.get('exact_text_quote'):
-                                        st.code(evidence['exact_text_quote'], language=None)
-                                    
-                                    if evidence.get('document_section'):
-                                        st.write(f"**📍 Found in:** {evidence['document_section']}")
-                                    
-                                    if evidence.get('context'):
-                                        with st.expander("📖 Full Context"):
-                                            st.text(evidence['context'])
-                                
-                                # Calculation details (for complex date determinations)
-                                if d.get('calculation_details'):
-                                    st.write(f"**🧮 Calculation:** {d['calculation_details']}")
+                                    st.code(d['legal_text_evidence'], language=None)
                                 
                                 # Source and correction needed
                                 st.write(f"**📂 Source Document:** {d.get('source_document', 'N/A')}")
                                 
                                 if d.get('correction_required'):
                                     st.error(f"**✏️ Correction Needed:** {d['correction_required']}")
+                                elif d.get('specific_issue'):
+                                    st.warning(f"**⚠️ Action Required:** Review and update cap table to match legal document exactly")
                     
                     # Enhanced download with more details
                     st.subheader("📥 Download Report")
