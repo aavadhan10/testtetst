@@ -71,12 +71,16 @@ class CapTableAuditor:
     def analyze_with_claude(self, text, doc_name):
         if not self.client: return {"error": "No client"}
         
+        # Clean the text to avoid JSON parsing issues
+        clean_text = text.replace('"', "'").replace('\n', ' ').replace('\r', ' ')
+        clean_text = ' '.join(clean_text.split())  # Remove extra whitespace
+        
         prompt = f"""You are a lawyer conducting a capitalization table tie out of a company on behalf of an investor.
 
 Analyze this legal document and extract ALL grant information with EXACT TEXT CITATIONS:
 
 Document: {doc_name}
-Content: {text[:10000]}
+Content: {clean_text[:10000]}
 
 For each grant found, extract:
 - Stockholder/Grantee name
@@ -87,7 +91,7 @@ For each grant found, extract:
 - Security type (options, shares, warrants, etc.)
 - Exercise price if applicable
 
-CRITICAL: For each piece of information extracted, provide the EXACT TEXT from the document where you found it, including surrounding context.
+CRITICAL: For each piece of information extracted, provide the EXACT TEXT from the document where you found it, including surrounding context. Replace any quotation marks with single quotes in your response.
 
 Return JSON format:
 {{
@@ -113,7 +117,7 @@ Return JSON format:
   "document_type": "board_consent/board_minutes/option_agreement/share_purchase_agreement/warrant/note/other"
 }}
 
-Be extremely precise and quote the exact text where each piece of information was found."""
+Be extremely precise and quote the exact text where each piece of information was found. Use only single quotes in your response, never double quotes."""
 
         try:
             response = self.client.messages.create(
@@ -121,9 +125,22 @@ Be extremely precise and quote the exact text where each piece of information wa
                 max_tokens=3000,
                 messages=[{"role": "user", "content": prompt}]
             )
-            text = response.content[0].text
-            start, end = text.find('{'), text.rfind('}') + 1
-            return json.loads(text[start:end]) if start != -1 else {"error": "No JSON"}
+            response_text = response.content[0].text
+            
+            # More robust JSON extraction
+            start = response_text.find('{')
+            end = response_text.rfind('}') + 1
+            
+            if start != -1 and end != -1:
+                json_str = response_text[start:end]
+                # Clean up any problematic characters
+                json_str = json_str.replace("'", '"')  # Convert single quotes back to double quotes for JSON
+                return json.loads(json_str)
+            else:
+                return {"error": "Could not find valid JSON in response"}
+                
+        except json.JSONDecodeError as e:
+            return {"error": f"JSON parsing error: {str(e)}"}
         except Exception as e:
             return {"error": str(e)}
 
@@ -269,83 +286,95 @@ def main():
             
             if "error" not in result:
                 discrepancies = result.get("discrepancies", [])
-                st.metric("Discrepancies", len(discrepancies))
+                summary = result.get("summary", {})
                 
+                # Results header with better layout
+                st.header("📋 Audit Results")
+                
+                # Summary metrics in prominent position
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Issues", len(discrepancies))
+                with col2:
+                    st.metric("🔴 High", summary.get("high_severity_count", 0))
+                with col3:
+                    st.metric("🟡 Medium", summary.get("medium_severity_count", 0))
+                with col4:
+                    st.metric("🟢 Low", summary.get("low_severity_count", 0))
+                
+                if summary.get("overall_assessment"):
+                    st.info(f"**📊 Overall Assessment:** {summary['overall_assessment']}")
+                
+                # Discrepancies section
                 if discrepancies:
-                    for d in discrepancies:
-                        severity = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(d.get("severity"), "⚪")
-                        with st.expander(f"{severity} {d.get('stockholder', 'Unknown')} - {d.get('discrepancy_type', 'Issue')}", expanded=d.get('severity') == 'high'):
-                            
-                            # Main discrepancy description
-                            st.write(f"**📋 Description:** {d.get('detailed_description', d.get('description', 'No details'))}")
-                            
-                            # Side-by-side comparison
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.write("**📊 Cap Table Shows:**")
-                                cap_shows = d.get('cap_table_shows', {})
-                                if cap_shows:
-                                    for key, value in cap_shows.items():
-                                        st.write(f"• {key}: `{value}`")
-                                else:
-                                    st.write(f"• {d.get('cap_table_value', 'N/A')}")
-                            
-                            with col2:
-                                st.write("**📄 Legal Document Shows:**")
-                                legal_shows = d.get('legal_document_shows', {})
-                                if legal_shows:
-                                    for key, value in legal_shows.items():
-                                        st.write(f"• {key}: `{value}`")
-                                else:
-                                    st.write(f"• {d.get('legal_document_value', 'N/A')}")
-                            
-                            # Legal evidence section
-                            evidence = d.get('legal_document_evidence', {})
-                            if evidence:
-                                st.write("**🔍 Legal Document Evidence:**")
-                                
-                                if evidence.get('exact_text_quote'):
-                                    st.code(evidence['exact_text_quote'], language=None)
-                                
-                                if evidence.get('document_section'):
-                                    st.write(f"**📍 Found in:** {evidence['document_section']}")
-                                
-                                if evidence.get('context'):
-                                    with st.expander("📖 Full Context"):
-                                        st.text(evidence['context'])
-                            
-                            # Calculation details (for complex date determinations)
-                            if d.get('calculation_details'):
-                                st.write(f"**🧮 Calculation:** {d['calculation_details']}")
-                            
-                            # Source and correction needed
-                            st.write(f"**📂 Source Document:** {d.get('source_document', 'N/A')}")
-                            
-                            if d.get('correction_required'):
-                                st.error(f"**✏️ Correction Needed:** {d['correction_required']}")
+                    st.subheader("🔍 Detailed Discrepancies")
                     
-                    # Show summary metrics
-                    summary = result.get("summary", {})
-                    if summary:
-                        st.subheader("📈 Summary Metrics")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("🔴 High Severity", summary.get("high_severity_count", 0))
-                        with col2:
-                            st.metric("🟡 Medium Severity", summary.get("medium_severity_count", 0))
-                        with col3:
-                            st.metric("🟢 Low Severity", summary.get("low_severity_count", 0))
+                    for i, d in enumerate(discrepancies, 1):
+                        severity = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(d.get("severity"), "⚪")
                         
-                        if summary.get("overall_assessment"):
-                            st.info(f"**📊 Overall Assessment:** {summary['overall_assessment']}")
+                        # Use a container to ensure proper scrolling
+                        with st.container():
+                            with st.expander(f"{severity} Issue {i}: {d.get('stockholder', 'Unknown')} - {d.get('discrepancy_type', 'Issue')}", expanded=d.get('severity') == 'high'):
+                                
+                                # Main discrepancy description
+                                st.markdown(f"**📋 Description:** {d.get('detailed_description', d.get('description', 'No details'))}")
+                                
+                                # Side-by-side comparison
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.markdown("**📊 Cap Table Shows:**")
+                                    cap_shows = d.get('cap_table_shows', {})
+                                    if cap_shows:
+                                        for key, value in cap_shows.items():
+                                            st.write(f"• {key}: `{value}`")
+                                    else:
+                                        st.write(f"• {d.get('cap_table_value', 'N/A')}")
+                                
+                                with col2:
+                                    st.markdown("**📄 Legal Document Shows:**")
+                                    legal_shows = d.get('legal_document_shows', {})
+                                    if legal_shows:
+                                        for key, value in legal_shows.items():
+                                            st.write(f"• {key}: `{value}`")
+                                    else:
+                                        st.write(f"• {d.get('legal_document_value', 'N/A')}")
+                                
+                                # Legal evidence section
+                                evidence = d.get('legal_document_evidence', {})
+                                if evidence:
+                                    st.markdown("**🔍 Legal Document Evidence:**")
+                                    
+                                    if evidence.get('exact_text_quote'):
+                                        st.code(evidence['exact_text_quote'], language=None)
+                                    
+                                    if evidence.get('document_section'):
+                                        st.write(f"**📍 Found in:** {evidence['document_section']}")
+                                    
+                                    if evidence.get('context'):
+                                        with st.expander("📖 Full Context"):
+                                            st.text(evidence['context'])
+                                
+                                # Calculation details (for complex date determinations)
+                                if d.get('calculation_details'):
+                                    st.write(f"**🧮 Calculation:** {d['calculation_details']}")
+                                
+                                # Source and correction needed
+                                st.write(f"**📂 Source Document:** {d.get('source_document', 'N/A')}")
+                                
+                                if d.get('correction_required'):
+                                    st.error(f"**✏️ Correction Needed:** {d['correction_required']}")
                     
                     # Enhanced download with more details
+                    st.subheader("📥 Download Report")
                     csv = pd.DataFrame(discrepancies).to_csv(index=False)
-                    st.download_button("📥 Download Detailed Audit Report", csv, "detailed_audit_report.csv")
+                    st.download_button("📊 Download Detailed Audit Report", csv, "detailed_audit_report.csv")
+                    
                 else:
-                    st.success("✅ No issues found!")
+                    st.success("🎉 No discrepancies found! Cap table matches legal documents perfectly.")
             else:
-                st.error(f"Error: {result['error']}")
+                st.error(f"❌ Comparison error: {result['error']}")
+        else:
+            st.warning("⚠️ No legal documents were successfully analyzed. Please check your files and try again.")
 
 if __name__ == "__main__":
     main()
