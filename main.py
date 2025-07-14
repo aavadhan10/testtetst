@@ -3,204 +3,162 @@ import pandas as pd
 import pdfplumber
 import anthropic
 import json
-from typing import Dict, List
+from docx import Document
 
-st.set_page_config(page_title="Cap Table Audit Tool", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Cap Table Audit", page_icon="📊", layout="wide")
 
 class CapTableAuditor:
-    def __init__(self, api_key=None):
-        self.client = anthropic.Anthropic(api_key=api_key) if api_key else None
-    
-    def extract_pdf_text(self, pdf_file) -> str:
+    def __init__(self):
         try:
-            with pdfplumber.open(pdf_file) as pdf:
-                return "\n".join([page.extract_text() for page in pdf.pages])
+            self.client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+        except:
+            st.error("❌ Add ANTHROPIC_API_KEY to secrets.toml")
+            self.client = None
+
+    def extract_text(self, file):
+        ext = file.name.split('.')[-1].lower()
+        try:
+            if ext == 'pdf':
+                with pdfplumber.open(file) as pdf:
+                    return "\n".join([p.extract_text() for p in pdf.pages])
+            elif ext in ['doc', 'docx']:
+                return "\n".join([p.text for p in Document(file).paragraphs])
+            elif ext in ['xls', 'xlsx']:
+                df = pd.read_excel(file, sheet_name=None)
+                return "\n".join([f"Sheet {k}:\n{v.to_string()}" for k,v in df.items()])
+            elif ext == 'csv':
+                return pd.read_csv(file).to_string()
         except Exception as e:
-            st.error(f"Error extracting PDF: {e}")
+            st.error(f"Error reading {file.name}: {e}")
             return ""
-    
-    def analyze_with_claude(self, text: str, doc_name: str) -> Dict:
-        if not self.client:
-            return {"error": "No API key"}
+
+    def load_cap_table(self, files):
+        dfs = []
+        for file in files:
+            ext = file.name.split('.')[-1].lower()
+            try:
+                if ext == 'csv':
+                    df = pd.read_csv(file)
+                elif ext in ['xls', 'xlsx']:
+                    df = pd.read_excel(file)
+                else:
+                    continue
+                df.columns = df.columns.str.strip().str.lower()
+                dfs.append(df)
+                st.success(f"✅ {file.name} ({len(df)} rows)")
+            except Exception as e:
+                st.error(f"❌ {file.name}: {e}")
+        return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+    def analyze_with_claude(self, text, doc_name):
+        if not self.client: return {"error": "No client"}
         
-        prompt = f"""You are a lawyer conducting a capitalization table tie out. Analyze this legal document and extract ALL grant information:
+        prompt = f"""Extract grant info from this legal document:
 
-Document: {doc_name}
-Content: {text}
+{text[:8000]}
 
-Extract for EACH grant:
-1. Stockholder/Grantee name
-2. Number of shares/options
-3. Grant date (for board consents: LAST signature date or explicit effective date; for board minutes: meeting date)
-4. Vesting start date
-5. Vesting schedule
-6. Security type
-7. Exercise price
-
-Return JSON format:
+Return JSON:
 {{
   "grants": [
-    {{
-      "stockholder": "Name",
-      "shares": "number",
-      "grant_date": "YYYY-MM-DD", 
-      "vesting_start": "YYYY-MM-DD",
-      "security_type": "options/shares/warrant",
-      "exercise_price": "price",
-      "notes": "details"
-    }}
+    {{"stockholder": "Name", "shares": "123", "grant_date": "2024-01-01", "vesting_start": "2024-01-01"}}
   ]
 }}"""
 
         try:
             response = self.client.messages.create(
                 model="claude-3-sonnet-20240229",
-                max_tokens=4000,
-                temperature=0,
+                max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}]
             )
-            
             text = response.content[0].text
-            start = text.find('{')
-            end = text.rfind('}') + 1
-            
-            if start != -1 and end != -1:
-                return json.loads(text[start:end])
-            return {"error": "No JSON found"}
+            start, end = text.find('{'), text.rfind('}') + 1
+            return json.loads(text[start:end]) if start != -1 else {"error": "No JSON"}
         except Exception as e:
             return {"error": str(e)}
-    
-    def compare_with_claude(self, cap_table_df: pd.DataFrame, legal_analysis: List[Dict]) -> Dict:
-        if not self.client:
-            return {"error": "No API key"}
+
+    def compare_with_claude(self, cap_df, legal_docs):
+        if not self.client: return {"error": "No client"}
         
-        prompt = f"""Compare cap table against legal documents. Legal docs are source of truth.
+        prompt = f"""Compare cap table vs legal docs. Find discrepancies:
 
-CAP TABLE:
-{cap_table_df.to_dict('records')}
-
-LEGAL DOCUMENTS:
-{legal_analysis}
-
-Find discrepancies in: grant dates, share counts, vesting dates, missing entries.
+CAP TABLE: {cap_df.head(20).to_dict('records')}
+LEGAL DOCS: {legal_docs}
 
 Return JSON:
 {{
   "discrepancies": [
-    {{
-      "stockholder": "Name",
-      "discrepancy_type": "shares_mismatch/date_mismatch/missing_doc",
-      "description": "Detailed issue",
-      "severity": "high/medium/low",
-      "cap_table_value": "what cap table shows",
-      "legal_doc_value": "what legal doc shows",
-      "source_document": "document name"
-    }}
+    {{"stockholder": "Name", "issue": "description", "severity": "high/medium/low"}}
   ],
-  "summary": {{
-    "total_discrepancies": 0,
-    "assessment": "overall findings"
-  }}
+  "summary": {{"total": 0}}
 }}"""
 
         try:
             response = self.client.messages.create(
                 model="claude-3-sonnet-20240229",
-                max_tokens=4000,
-                temperature=0,
+                max_tokens=3000,
                 messages=[{"role": "user", "content": prompt}]
             )
-            
             text = response.content[0].text
-            start = text.find('{')
-            end = text.rfind('}') + 1
-            
-            if start != -1 and end != -1:
-                return json.loads(text[start:end])
-            return {"error": "No JSON found"}
+            start, end = text.find('{'), text.rfind('}') + 1
+            return json.loads(text[start:end]) if start != -1 else {"error": "No JSON"}
         except Exception as e:
             return {"error": str(e)}
 
 def main():
-    st.title("📊 AI Cap Table Audit Tool")
+    st.title("📊 Cap Table Audit Tool")
     
-    # API Key
-    api_key = st.sidebar.text_input("Claude API Key:", type="password")
-    if not api_key:
-        st.sidebar.warning("Enter Claude API key for AI analysis")
-    
-    auditor = CapTableAuditor(api_key)
+    auditor = CapTableAuditor()
+    if not auditor.client: st.stop()
     
     # File uploads
     col1, col2 = st.columns(2)
     with col1:
-        cap_file = st.file_uploader("Cap Table (CSV)", type=['csv'])
+        cap_files = st.file_uploader("Cap Table", type=['csv','xlsx','xls'], accept_multiple_files=True)
     with col2:
-        legal_files = st.file_uploader("Legal Documents (PDFs)", type=['pdf'], accept_multiple_files=True)
+        legal_files = st.file_uploader("Legal Docs", type=['pdf','docx','doc','xlsx','csv'], accept_multiple_files=True)
     
-    if cap_file and legal_files and api_key:
-        # Process cap table
-        cap_df = pd.read_csv(cap_file)
-        st.success(f"✅ Loaded {len(cap_df)} cap table entries")
+    if cap_files and legal_files:
+        # Load cap table
+        cap_df = auditor.load_cap_table(cap_files)
+        if cap_df.empty: return
         
         with st.expander("Cap Table Preview"):
             st.dataframe(cap_df.head())
         
-        # Analyze legal documents
+        # Analyze legal docs
         legal_analysis = []
-        progress = st.progress(0)
-        
         for i, file in enumerate(legal_files):
-            st.write(f"📄 Analyzing: {file.name}")
-            text = auditor.extract_pdf_text(file)
-            analysis = auditor.analyze_with_claude(text, file.name)
-            
-            if "error" not in analysis:
-                legal_analysis.append(analysis)
-                st.success(f"✅ {file.name}")
-            else:
-                st.error(f"❌ {file.name}: {analysis['error']}")
-            
-            progress.progress((i + 1) / len(legal_files))
+            st.write(f"📄 {file.name}")
+            text = auditor.extract_text(file)
+            if text:
+                analysis = auditor.analyze_with_claude(text, file.name)
+                if "error" not in analysis:
+                    legal_analysis.append(analysis)
+                    st.success("✅")
+                else:
+                    st.error(f"❌ {analysis['error']}")
         
-        # Compare with Claude
+        # Compare
         if legal_analysis:
-            comparison = auditor.compare_with_claude(cap_df, legal_analysis)
+            result = auditor.compare_with_claude(cap_df, legal_analysis)
             
-            if "error" not in comparison:
-                discrepancies = comparison.get("discrepancies", [])
-                summary = comparison.get("summary", {})
-                
-                # Results
-                st.header("🔍 Audit Results")
-                st.metric("Total Discrepancies", summary.get("total_discrepancies", 0))
-                
-                if summary.get("assessment"):
-                    st.info(summary["assessment"])
+            if "error" not in result:
+                discrepancies = result.get("discrepancies", [])
+                st.metric("Discrepancies", len(discrepancies))
                 
                 if discrepancies:
-                    st.error(f"❌ Found {len(discrepancies)} issues")
+                    for d in discrepancies:
+                        severity = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(d.get("severity"), "⚪")
+                        with st.expander(f"{severity} {d.get('stockholder', 'Unknown')}"):
+                            st.write(d.get('issue', 'No details'))
                     
-                    for i, disc in enumerate(discrepancies, 1):
-                        severity_icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(disc.get("severity"), "⚪")
-                        
-                        with st.expander(f"{severity_icon} {disc['stockholder']} - {disc.get('discrepancy_type', 'Issue')}", expanded=disc.get('severity') == 'high'):
-                            st.write(f"**Issue:** {disc['description']}")
-                            st.write(f"**Cap Table:** {disc.get('cap_table_value', 'N/A')}")
-                            st.write(f"**Legal Doc:** {disc.get('legal_doc_value', 'N/A')}")
-                            st.write(f"**Source:** {disc.get('source_document', 'N/A')}")
-                    
-                    # Download report
-                    report_df = pd.DataFrame(discrepancies)
-                    csv = report_df.to_csv(index=False)
-                    st.download_button("📥 Download Report", csv, "audit_report.csv", "text/csv")
+                    # Download
+                    csv = pd.DataFrame(discrepancies).to_csv(index=False)
+                    st.download_button("📥 Download Report", csv, "audit.csv")
                 else:
-                    st.success("✅ No discrepancies found!")
+                    st.success("✅ No issues found!")
             else:
-                st.error(f"Comparison error: {comparison['error']}")
-    
-    elif cap_file and legal_files and not api_key:
-        st.warning("⚠️ Enter Claude API key for full analysis")
+                st.error(f"Error: {result['error']}")
 
 if __name__ == "__main__":
     main()
