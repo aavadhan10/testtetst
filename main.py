@@ -460,7 +460,7 @@ def main():
                 st.header("🤖 LLM Analysis Results")
                 
                 # Parse the analysis result to create cards
-                self.display_analysis_with_cards(analysis_result)
+                analyzer.display_analysis_with_cards(analysis_result)
                 
                 # Create downloadable report
                 st.markdown("---")
