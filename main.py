@@ -160,272 +160,6 @@ Be extremely thorough - this is for investor due diligence and every discrepancy
             
         except Exception as e:
             return f"Error analyzing documents: {str(e)}"
-    
-    def display_analysis_with_cards(self, analysis_result: str):
-        """Display analysis results in pretty card format"""
-        
-        # Show raw analysis in an expander first
-        with st.expander("📄 View Full Raw Analysis"):
-            st.markdown(analysis_result)
-        
-        # Try to parse discrepancies from the text
-        discrepancies = self.parse_discrepancies_from_text(analysis_result)
-        
-        if discrepancies:
-            # Summary metrics
-            st.subheader("📊 Summary")
-            
-            high_count = len([d for d in discrepancies if d.get('severity') == 'HIGH'])
-            medium_count = len([d for d in discrepancies if d.get('severity') == 'MEDIUM'])
-            low_count = len([d for d in discrepancies if d.get('severity') == 'LOW'])
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("🔍 Total Issues", len(discrepancies))
-            with col2:
-                st.metric("🔴 High Severity", high_count)
-            with col3:
-                st.metric("🟡 Medium Severity", medium_count) 
-            with col4:
-                st.metric("🟢 Low Severity", low_count)
-            
-            # Risk level assessment
-            if high_count >= 5:
-                st.error("🚨 **CRITICAL RISK**: Multiple high-severity issues require immediate attention")
-            elif high_count >= 2:
-                st.warning("⚠️ **HIGH RISK**: Several important discrepancies found")
-            elif high_count >= 1:
-                st.warning("⚠️ **MEDIUM RISK**: Some discrepancies need correction")
-            else:
-                st.success("✅ **LOW RISK**: Minor issues only")
-            
-            # Display discrepancies as cards
-            st.subheader("🔍 Detailed Discrepancies")
-            
-            for i, disc in enumerate(discrepancies, 1):
-                self.create_discrepancy_card(i, disc)
-        else:
-            # Fallback to regular display if parsing fails
-            st.info("💡 Could not parse structured discrepancies. Showing full analysis:")
-            st.markdown(analysis_result)
-    
-    def parse_discrepancies_from_text(self, text: str) -> List[Dict]:
-        """Parse discrepancies from LLM response text with better pattern matching"""
-        discrepancies = []
-        
-        # Split into sections and look for discrepancy patterns
-        sections = text.split('\n\n')  # Split by double newlines
-        
-        for section in sections:
-            lines = section.strip().split('\n')
-            
-            # Look for discrepancy indicators
-            discrepancy_indicators = [
-                'discrepancy', 'issue', 'problem', 'error', 
-                'severity:', 'stockholder:', 'high', 'medium', 'low'
-            ]
-            
-            if any(indicator in section.lower() for indicator in discrepancy_indicators):
-                disc = self.extract_discrepancy_from_section(section)
-                if disc and any(disc.values()):  # Only add if we extracted meaningful data
-                    discrepancies.append(disc)
-        
-        # If we didn't find structured discrepancies, try line-by-line approach
-        if not discrepancies:
-            discrepancies = self.parse_line_by_line(text)
-        
-        return discrepancies
-    
-    def extract_discrepancy_from_section(self, section: str) -> Dict:
-        """Extract discrepancy info from a text section"""
-        disc = {}
-        lines = section.split('\n')
-        
-        for line in lines:
-            line = line.strip()
-            lower_line = line.lower()
-            
-            # Extract severity
-            if 'severity:' in lower_line:
-                disc['severity'] = line.split(':', 1)[1].strip().upper()
-            elif any(sev in lower_line for sev in ['high', 'medium', 'low']):
-                if 'high' in lower_line:
-                    disc['severity'] = 'HIGH'
-                elif 'medium' in lower_line:
-                    disc['severity'] = 'MEDIUM'
-                elif 'low' in lower_line:
-                    disc['severity'] = 'LOW'
-            
-            # Extract stockholder
-            if 'stockholder:' in lower_line:
-                disc['stockholder'] = line.split(':', 1)[1].strip()
-            elif any(name in line for name in ['John Doe', 'Jane Smith']):
-                for name in ['John Doe', 'Jane Smith']:
-                    if name in line:
-                        disc['stockholder'] = name
-                        break
-            
-            # Extract issue type
-            if 'issue:' in lower_line:
-                disc['issue'] = line.split(':', 1)[1].strip()
-            elif any(issue_type in lower_line for issue_type in [
-                'board approval', 'phantom equity', 'repurchase', 'price', 
-                'vesting', 'missing', 'incorrect'
-            ]):
-                disc['issue'] = line.strip()
-            
-            # Extract cap table value
-            if 'cap table shows:' in lower_line or 'cap table:' in lower_line:
-                disc['cap_table_value'] = line.split(':', 1)[1].strip()
-            
-            # Extract legal document value
-            if any(phrase in lower_line for phrase in [
-                'legal documents show:', 'should be:', 'correct:', 'board documents:'
-            ]):
-                disc['legal_value'] = line.split(':', 1)[1].strip()
-            
-            # Extract source document
-            if 'reference:' in lower_line or 'source:' in lower_line or 'template' in lower_line:
-                disc['source'] = line.strip()
-        
-        # Try to extract issue from first line if not found
-        if 'issue' not in disc and lines:
-            first_line = lines[0].strip()
-            # Clean up common prefixes
-            for prefix in ['1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '-', '*']:
-                if first_line.startswith(prefix):
-                    first_line = first_line[len(prefix):].strip()
-            disc['issue'] = first_line
-        
-        return disc
-    
-    def parse_line_by_line(self, text: str) -> List[Dict]:
-        """Fallback: parse line by line looking for key information"""
-        discrepancies = []
-        lines = text.split('\n')
-        
-        current_disc = {}
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            lower_line = line.lower()
-            
-            # Look for numbered items or bullet points that might be discrepancies
-            if any(line.startswith(prefix) for prefix in ['1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '-', '*']):
-                # Save previous discrepancy
-                if current_disc:
-                    discrepancies.append(current_disc)
-                current_disc = {'issue': line, 'description': line}
-            
-            # Look for severity mentions
-            elif any(sev in lower_line for sev in ['high', 'medium', 'low']):
-                if 'high' in lower_line:
-                    current_disc['severity'] = 'HIGH'
-                elif 'medium' in lower_line:
-                    current_disc['severity'] = 'MEDIUM' 
-                elif 'low' in lower_line:
-                    current_disc['severity'] = 'LOW'
-            
-            # Look for stockholder names
-            elif any(name in line for name in ['John Doe', 'Jane Smith']):
-                for name in ['John Doe', 'Jane Smith']:
-                    if name in line:
-                        current_disc['stockholder'] = name
-                        break
-            
-            # Look for specific values
-            elif 'may 16' in lower_line and '2025' in line:
-                current_disc['cap_table_value'] = 'May 16, 2025'
-            elif 'march 1' in lower_line or 'january 1' in lower_line:
-                current_disc['legal_value'] = line.strip()
-            elif 'template' in lower_line:
-                current_disc['source'] = line.strip()
-        
-        # Add last discrepancy
-        if current_disc:
-            discrepancies.append(current_disc)
-        
-        return discrepancies
-    
-    def create_discrepancy_card(self, number: int, discrepancy: Dict):
-        """Create a pretty card for each discrepancy"""
-        
-        # Determine card styling based on severity
-        severity = discrepancy.get('severity', 'UNKNOWN').upper()
-        if severity == 'HIGH':
-            border_color = "#ff4444"
-            header_emoji = "🔴"
-            bg_color = "#fff5f5"
-        elif severity == 'MEDIUM':
-            border_color = "#ffaa00"
-            header_emoji = "🟡"
-            bg_color = "#fffaf0"
-        elif severity == 'LOW':
-            border_color = "#00aa00"
-            header_emoji = "🟢"
-            bg_color = "#f0fff4"
-        else:
-            border_color = "#888888"
-            header_emoji = "⚪"
-            bg_color = "#f9f9f9"
-        
-        # Create the card using HTML
-        title = discrepancy.get('title', discrepancy.get('issue', f'Discrepancy #{number}'))
-        stockholder = discrepancy.get('stockholder', 'Unknown')
-        issue = discrepancy.get('issue', 'Issue not specified')
-        
-        with st.container():
-            st.markdown(
-                f"""
-                <div style="
-                    border-left: 4px solid {border_color};
-                    background-color: {bg_color};
-                    padding: 1rem;
-                    margin: 1rem 0;
-                    border-radius: 0 8px 8px 0;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                ">
-                    <h4 style="margin: 0 0 0.5rem 0; color: {border_color};">
-                        {header_emoji} DISCREPANCY #{number}: {issue}
-                    </h4>
-                    <p style="margin: 0; font-weight: bold; color: #333;">
-                        👤 <strong>Stockholder:</strong> {stockholder} | 
-                        📊 <strong>Severity:</strong> {severity}
-                    </p>
-                </div>
-                """, 
-                unsafe_allow_html=True
-            )
-            
-            # Details in columns
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**📋 Cap Table Shows:**")
-                cap_value = discrepancy.get('cap_table_value', 'Not specified')
-                st.code(cap_value)
-                
-                if 'security_id' in discrepancy:
-                    st.markdown("**🆔 Security ID:**")
-                    st.code(discrepancy['security_id'])
-            
-            with col2:
-                st.markdown("**📜 Legal Documents Show:**")
-                legal_value = discrepancy.get('legal_value', 'Not specified')
-                st.code(legal_value)
-                
-                if 'source' in discrepancy:
-                    st.markdown("**📄 Source Document:**")
-                    st.code(discrepancy['source'])
-            
-            if 'description' in discrepancy:
-                st.markdown("**📝 Description:**")
-                st.write(discrepancy['description'])
-            
-            st.markdown("---")
 
 def main():
     st.title("📊 Cap Table Tie-Out Analysis")
@@ -545,12 +279,28 @@ def main():
                 # Send to LLM for analysis
                 analysis_result = analyzer.analyze_with_llm(board_docs, cap_table_text)
                 
-                # Display results with pretty formatting
+                # Display results - clean and simple like the original Claude analysis
                 st.markdown("---")
                 st.header("🤖 LLM Analysis Results")
                 
-                # Parse the analysis result to create cards
-                analyzer.display_analysis_with_cards(analysis_result)
+                # Display the analysis in a clean format
+                st.markdown(analysis_result)
+                
+                # Add some basic metrics if we can extract them
+                high_count = analysis_result.lower().count('high')
+                medium_count = analysis_result.lower().count('medium') 
+                low_count = analysis_result.lower().count('low')
+                
+                if high_count > 0 or medium_count > 0 or low_count > 0:
+                    st.markdown("---")
+                    st.subheader("📊 Quick Summary")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("🔴 High Issues", high_count)
+                    with col2:
+                        st.metric("🟡 Medium Issues", medium_count)
+                    with col3:
+                        st.metric("🟢 Low Issues", low_count)
                 
                 # Create downloadable report
                 st.markdown("---")
