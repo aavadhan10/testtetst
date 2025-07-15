@@ -59,17 +59,45 @@ class LLMCapTableAnalyzer:
             return f"Error reading Excel file {filename}: {str(e)}"
     
     def create_analysis_prompt(self, board_docs: Dict[str, str], cap_table_text: str) -> str:
-        """Create the prompt that replicates the original analysis request"""
+        """Create the enhanced prompt that catches all discrepancies"""
         
-        prompt = """You are a lawyer conducting a capitalization table tie out of a company on behalf of an investor.
+        prompt = """You are a lawyer conducting a comprehensive capitalization table tie out of a company on behalf of an investor. You must be extremely thorough and catch EVERY discrepancy, no matter how small.
 
-1. Compare the company's capitalization table against the legal documents, all of which will be uploaded. The legal documents are the ultimate source of truth, and you are auditing the capitalization table to make sure it reflects the legal documents.
+CRITICAL INSTRUCTIONS:
+1. Compare the company's capitalization table against the legal documents. The legal documents are the ultimate source of truth.
 
-2. For each stockholder's grant in the capitalization table, confirm that the grant details, including the grant date, number of shares issued, vesting start date, and vesting schedule match what is approved in the corresponding board consent, board minutes, or other grant documents, including any share purchase agreement, option grant agreement, warrant, note, or other convertible securities.
+2. For EACH stockholder's grant in the capitalization table, verify:
+   - Grant date matches board approval date
+   - Number of shares issued matches board approval
+   - Price per share is correct (calculate from cost basis ÷ shares)
+   - Vesting start date matches board documents
+   - Vesting schedule matches board documents
+   - Issue date matches board approval date
+   - Board approval date is accurate
 
-3. The grant date in any board consent is the last date a director signed the consent, or the explicitly written effective date of the board approval. The grant date in any board minutes is the date the meeting was held.
+3. PHANTOM EQUITY DETECTION:
+   - Flag ANY cap table entry that lacks supporting board documentation
+   - Every grant must have a corresponding board consent, resolution, or legal document
+   - If you cannot find board approval for a grant, it's a HIGH severity phantom equity issue
 
-4. Please list out all discrepancies, and provide a brief summary of each discrepancy, including which stockholder is impacted, what is incorrect on the capitalization table, and what it should be based on the legal documents, making reference to the specific legal document.
+4. VESTING SCHEDULE VERIFICATION:
+   - Check if vesting schedule format matches between cap table and board documents
+   - Look for discrepancies like "monthly" vs "annual" vesting
+   - Flag if board says "1/48th monthly" but cap table shows different vesting frequency
+   - Verify vesting schedule descriptions match exactly (e.g., "1/48 monthly" vs "25% annually")
+   - Flag vesting schedule mismatches as HIGH severity
+
+5. REPURCHASE/CANCELLATION VERIFICATION:
+   - Check if cap table reflects any share repurchases or cancellations from board documents
+   - Verify remaining share counts after repurchases
+   - Check if repurchase pricing matches original grant pricing
+
+6. GRANULAR ANALYSIS REQUIRED:
+   - List each discrepancy separately (don't group multiple issues)
+   - Check dates, quantities, pricing, and math independently
+   - Be as detailed as the most thorough legal review
+
+7. The grant date in any board consent is the last date a director signed the consent, or the explicitly written effective date.
 
 Here are the documents to analyze:
 
@@ -84,19 +112,31 @@ BOARD DOCUMENTS:
         
         prompt += """
 
-Please analyze these documents using the same methodology as a thorough legal review and provide:
+ANALYSIS REQUIREMENTS:
 
-1. A detailed analysis of the cap table entries
-2. A comprehensive list of all discrepancies found
-3. For each discrepancy, include:
-   - Severity level (HIGH/MEDIUM/LOW)
-   - Stockholder impacted
-   - What's incorrect in the cap table
-   - What it should be based on legal documents
-   - Reference to specific source document
-   - Description of the issue
+1. DOCUMENT MAPPING: First, create a list of all board-approved grants from the legal documents
+2. CAP TABLE REVIEW: Analyze each cap table entry against this list
+3. PHANTOM EQUITY: Identify entries with no board support
+4. MATHEMATICAL VERIFICATION: Calculate and verify all vesting amounts
+5. DISCREPANCY IDENTIFICATION: List every single discrepancy found
 
-Format your response as a detailed analysis report similar to how a lawyer would present findings in a due diligence review."""
+For each discrepancy, provide:
+- Discrepancy #[number]
+- Severity: HIGH/MEDIUM/LOW
+- Stockholder: [name]
+- Security ID: [ID from cap table]
+- Issue: [brief title]
+- Cap Table Shows: [specific value]
+- Legal Documents Show: [what it should be]
+- Description: [detailed explanation]
+- Source Document: [specific filename]
+
+SEVERITY GUIDELINES:
+- HIGH: Phantom equity, wrong share counts, incorrect pricing, missing repurchases, wrong vesting calculations
+- MEDIUM: Date discrepancies, documentation gaps
+- LOW: Minor formatting or non-material issues
+
+Be extremely thorough - this is for investor due diligence and every discrepancy matters. Aim to find 8-12 discrepancies if the cap table has significant issues."""
         
         return prompt
     
@@ -120,6 +160,182 @@ Format your response as a detailed analysis report similar to how a lawyer would
             
         except Exception as e:
             return f"Error analyzing documents: {str(e)}"
+    
+    def display_analysis_with_cards(self, analysis_result: str):
+        """Display analysis results in pretty card format"""
+        
+        # Show raw analysis in an expander first
+        with st.expander("📄 View Full Raw Analysis"):
+            st.markdown(analysis_result)
+        
+        # Try to parse discrepancies from the text
+        discrepancies = self.parse_discrepancies_from_text(analysis_result)
+        
+        if discrepancies:
+            # Summary metrics
+            st.subheader("📊 Summary")
+            
+            high_count = len([d for d in discrepancies if d.get('severity') == 'HIGH'])
+            medium_count = len([d for d in discrepancies if d.get('severity') == 'MEDIUM'])
+            low_count = len([d for d in discrepancies if d.get('severity') == 'LOW'])
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("🔍 Total Issues", len(discrepancies))
+            with col2:
+                st.metric("🔴 High Severity", high_count)
+            with col3:
+                st.metric("🟡 Medium Severity", medium_count) 
+            with col4:
+                st.metric("🟢 Low Severity", low_count)
+            
+            # Risk level assessment
+            if high_count >= 5:
+                st.error("🚨 **CRITICAL RISK**: Multiple high-severity issues require immediate attention")
+            elif high_count >= 2:
+                st.warning("⚠️ **HIGH RISK**: Several important discrepancies found")
+            elif high_count >= 1:
+                st.warning("⚠️ **MEDIUM RISK**: Some discrepancies need correction")
+            else:
+                st.success("✅ **LOW RISK**: Minor issues only")
+            
+            # Display discrepancies as cards
+            st.subheader("🔍 Detailed Discrepancies")
+            
+            for i, disc in enumerate(discrepancies, 1):
+                self.create_discrepancy_card(i, disc)
+        else:
+            # Fallback to regular display if parsing fails
+            st.info("💡 Could not parse structured discrepancies. Showing full analysis:")
+            st.markdown(analysis_result)
+    
+    def parse_discrepancies_from_text(self, text: str) -> List[Dict]:
+        """Parse discrepancies from LLM response text"""
+        discrepancies = []
+        
+        # Look for numbered discrepancies or structured patterns
+        lines = text.split('\n')
+        current_discrepancy = {}
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Look for discrepancy headers
+            if any(starter in line.lower() for starter in ['discrepancy #', 'issue #', '1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.']):
+                # Save previous discrepancy if exists
+                if current_discrepancy:
+                    discrepancies.append(current_discrepancy)
+                    current_discrepancy = {}
+                
+                # Extract issue title
+                current_discrepancy['title'] = line
+                
+            # Look for specific fields
+            elif line.lower().startswith('severity:'):
+                current_discrepancy['severity'] = line.split(':', 1)[1].strip()
+            elif line.lower().startswith('stockholder:'):
+                current_discrepancy['stockholder'] = line.split(':', 1)[1].strip()
+            elif line.lower().startswith('security id:'):
+                current_discrepancy['security_id'] = line.split(':', 1)[1].strip()
+            elif line.lower().startswith('issue:'):
+                current_discrepancy['issue'] = line.split(':', 1)[1].strip()
+            elif 'cap table shows:' in line.lower():
+                current_discrepancy['cap_table_value'] = line.split(':', 1)[1].strip()
+            elif 'legal documents show:' in line.lower() or 'correct' in line.lower():
+                current_discrepancy['legal_value'] = line.split(':', 1)[1].strip()
+            elif line.lower().startswith('description:'):
+                current_discrepancy['description'] = line.split(':', 1)[1].strip()
+            elif line.lower().startswith('source document:') or line.lower().startswith('reference:'):
+                current_discrepancy['source'] = line.split(':', 1)[1].strip()
+            elif current_discrepancy and line and not line.startswith('-'):
+                # Add to description if we have a current discrepancy
+                if 'description' not in current_discrepancy:
+                    current_discrepancy['description'] = line
+                else:
+                    current_discrepancy['description'] += ' ' + line
+        
+        # Add the last discrepancy
+        if current_discrepancy:
+            discrepancies.append(current_discrepancy)
+        
+        return discrepancies
+    
+    def create_discrepancy_card(self, number: int, discrepancy: Dict):
+        """Create a pretty card for each discrepancy"""
+        
+        # Determine card styling based on severity
+        severity = discrepancy.get('severity', 'UNKNOWN').upper()
+        if severity == 'HIGH':
+            border_color = "#ff4444"
+            header_emoji = "🔴"
+            bg_color = "#fff5f5"
+        elif severity == 'MEDIUM':
+            border_color = "#ffaa00"
+            header_emoji = "🟡"
+            bg_color = "#fffaf0"
+        elif severity == 'LOW':
+            border_color = "#00aa00"
+            header_emoji = "🟢"
+            bg_color = "#f0fff4"
+        else:
+            border_color = "#888888"
+            header_emoji = "⚪"
+            bg_color = "#f9f9f9"
+        
+        # Create the card using HTML
+        title = discrepancy.get('title', discrepancy.get('issue', f'Discrepancy #{number}'))
+        stockholder = discrepancy.get('stockholder', 'Unknown')
+        issue = discrepancy.get('issue', 'Issue not specified')
+        
+        with st.container():
+            st.markdown(
+                f"""
+                <div style="
+                    border-left: 4px solid {border_color};
+                    background-color: {bg_color};
+                    padding: 1rem;
+                    margin: 1rem 0;
+                    border-radius: 0 8px 8px 0;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                ">
+                    <h4 style="margin: 0 0 0.5rem 0; color: {border_color};">
+                        {header_emoji} DISCREPANCY #{number}: {issue}
+                    </h4>
+                    <p style="margin: 0; font-weight: bold; color: #333;">
+                        👤 <strong>Stockholder:</strong> {stockholder} | 
+                        📊 <strong>Severity:</strong> {severity}
+                    </p>
+                </div>
+                """, 
+                unsafe_allow_html=True
+            )
+            
+            # Details in columns
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**📋 Cap Table Shows:**")
+                cap_value = discrepancy.get('cap_table_value', 'Not specified')
+                st.code(cap_value)
+                
+                if 'security_id' in discrepancy:
+                    st.markdown("**🆔 Security ID:**")
+                    st.code(discrepancy['security_id'])
+            
+            with col2:
+                st.markdown("**📜 Legal Documents Show:**")
+                legal_value = discrepancy.get('legal_value', 'Not specified')
+                st.code(legal_value)
+                
+                if 'source' in discrepancy:
+                    st.markdown("**📄 Source Document:**")
+                    st.code(discrepancy['source'])
+            
+            if 'description' in discrepancy:
+                st.markdown("**📝 Description:**")
+                st.write(discrepancy['description'])
+            
+            st.markdown("---")
 
 def main():
     st.title("📊 Cap Table Tie-Out Analysis")
@@ -239,10 +455,12 @@ def main():
                 # Send to LLM for analysis
                 analysis_result = analyzer.analyze_with_llm(board_docs, cap_table_text)
                 
-                # Display results
+                # Display results with pretty formatting
                 st.markdown("---")
                 st.header("🤖 LLM Analysis Results")
-                st.markdown(analysis_result)
+                
+                # Parse the analysis result to create cards
+                self.display_analysis_with_cards(analysis_result)
                 
                 # Create downloadable report
                 st.markdown("---")
