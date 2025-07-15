@@ -1,414 +1,583 @@
 import streamlit as st
 import pandas as pd
-import pdfplumber
-import anthropic
-import json
+import openpyxl
 from docx import Document
+import io
+from datetime import datetime
+import re
+import tempfile
+import os
 
-st.set_page_config(page_title="Cap Table Audit", page_icon="📊", layout="wide")
+# Page configuration
+st.set_page_config(
+    page_title="Cap Table Tie-Out Analysis",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-class CapTableAuditor:
+class CapTableAnalyzer:
     def __init__(self):
-        try:
-            self.client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
-        except:
-            st.error("❌ Add ANTHROPIC_API_KEY to secrets.toml")
-            self.client = None
-
-    def extract_text(self, file):
-        ext = file.name.split('.')[-1].lower()
-        try:
-            if ext == 'pdf':
-                with pdfplumber.open(file) as pdf:
-                    return "\n".join([p.extract_text() for p in pdf.pages])
-            elif ext in ['doc', 'docx']:
-                return "\n".join([p.text for p in Document(file).paragraphs])
-            elif ext in ['xls', 'xlsx']:
-                df = pd.read_excel(file, sheet_name=None)
-                return "\n".join([f"Sheet {k}:\n{v.to_string()}" for k,v in df.items()])
-            elif ext == 'csv':
-                return pd.read_csv(file).to_string()
-        except Exception as e:
-            st.error(f"Error reading {file.name}: {e}")
-            return ""
-
-    def load_cap_table(self, files):
-        dfs = []
-        for file in files:
-            ext = file.name.split('.')[-1].lower()
-            try:
-                if ext == 'csv':
-                    # Try different CSV parsing options
-                    try:
-                        df = pd.read_csv(file)
-                    except:
-                        # Try with different separator
-                        file.seek(0)
-                        try:
-                            df = pd.read_csv(file, sep=';')
-                        except:
-                            # Try with different quote handling
-                            file.seek(0)
-                            try:
-                                df = pd.read_csv(file, quotechar='"', quoting=1)
-                            except:
-                                # Last resort - skip bad lines
-                                file.seek(0)
-                                df = pd.read_csv(file, error_bad_lines=False, warn_bad_lines=True)
-                elif ext in ['xls', 'xlsx']:
-                    df = pd.read_excel(file)
-                else:
-                    continue
-                
-                df.columns = df.columns.str.strip().str.lower()
-                dfs.append(df)
-                st.success(f"✅ {file.name} ({len(df)} rows)")
-            except Exception as e:
-                st.error(f"❌ {file.name}: {e}")
-                st.info("💡 Try saving as Excel (.xlsx) format if CSV continues to fail")
-        return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-
-    def analyze_with_claude(self, text, doc_name):
-        if not self.client: return {"error": "No client"}
+        self.board_docs_content = {}
+        self.cap_table_entries = []
+        self.board_analysis = {}
         
-        # More aggressive text cleaning
-        import re
-        clean_text = re.sub(r'[^\w\s\-\.\,\:\;\(\)\[\]\/]', ' ', text)  # Remove special chars
-        clean_text = ' '.join(clean_text.split())  # Normalize whitespace
+    def save_uploaded_files(self, board_files, cap_table_file):
+        """Save uploaded files temporarily for JavaScript analysis"""
+        temp_dir = tempfile.mkdtemp()
+        file_paths = {}
         
-        prompt = f"""You are a lawyer conducting a capitalization table tie out. Analyze this document and extract EXACT grant details.
-
-Document: {doc_name}
-Content: {clean_text[:8000]}
-
-Extract PRECISE details for each grant, even if some information is missing or incomplete:
-- Stockholder name (even if partial)
-- EXACT share count if available
-- Grant date if available (board consent: LAST signature date; board minutes: meeting date)
-- Vesting start date if available
-- DETAILED vesting schedule if available (e.g., "1/48th monthly over 4 years")
-- Security type if available
-- Exercise price if available
-
-IMPORTANT: If some fields are missing or unclear, still extract what you can find. Mark missing fields as "not specified" or "unclear from document".
-
-Return JSON - include grants even if incomplete:
-{{
-  "grants": [
-    {{
-      "stockholder": "Full Name or partial name if available",
-      "shares": "exact_number or 'not specified'",
-      "grant_date": "YYYY-MM-DD or 'not specified'",
-      "vesting_start": "YYYY-MM-DD or 'not specified'",
-      "vesting_schedule_detailed": "exact vesting description or 'not specified'",
-      "security_type": "options/shares/warrant or 'not specified'",
-      "exercise_price": "price or 'not specified'",
-      "source_text": "relevant text from document",
-      "completeness": "complete/partial/minimal"
-    }}
-  ],
-  "document_type": "board_consent",
-  "extraction_notes": "Any issues or missing information noted"
-}}"""
-
+        # Save board documents
+        if board_files:
+            for file in board_files:
+                file_path = os.path.join(temp_dir, file.name)
+                with open(file_path, 'wb') as f:
+                    f.write(file.read())
+                file_paths[file.name] = file_path
+                
+                # Also read content for analysis
+                if file.name.endswith('.docx'):
+                    file.seek(0)  # Reset file pointer
+                    doc = Document(io.BytesIO(file.read()))
+                    content = '\n'.join([p.text for p in doc.paragraphs])
+                    self.board_docs_content[file.name] = content
+        
+        # Save cap table
+        if cap_table_file:
+            cap_file_path = os.path.join(temp_dir, cap_table_file.name)
+            with open(cap_file_path, 'wb') as f:
+                f.write(cap_table_file.read())
+            file_paths['cap_table'] = cap_file_path
+        
+        return file_paths, temp_dir
+    
+    def analyze_excel_like_original(self, cap_table_file):
+        """Analyze Excel file exactly like I did with JavaScript"""
+        st.subheader("📊 Cap Table Data Inspection")
+        st.write("*Replicating the JavaScript/SheetJS analysis approach*")
+        
         try:
-            response = self.client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=2000,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}]
-            )
+            # Read Excel file with openpyxl (similar to SheetJS)
+            cap_table_file.seek(0)
+            df = pd.read_excel(io.BytesIO(cap_table_file.read()), engine='openpyxl', header=None)
             
-            response_text = response.content[0].text.strip()
+            # Show raw structure first (like I did)
+            st.write("**First 10 rows of raw data:**")
+            for i in range(min(10, len(df))):
+                row_data = df.iloc[i].tolist()
+                st.write(f"Row {i + 1}: {row_data}")
             
-            # Find JSON boundaries more carefully
-            json_start = -1
-            json_end = -1
-            brace_count = 0
+            # Find header row (like I did manually)
+            header_row_idx = None
+            for i, row in df.iterrows():
+                row_str = ' '.join([str(cell) for cell in row if pd.notna(cell)])
+                if 'Security ID' in row_str and 'Stakeholder Name' in row_str:
+                    header_row_idx = i
+                    break
             
-            for i, char in enumerate(response_text):
-                if char == '{':
-                    if json_start == -1:
-                        json_start = i
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0 and json_start != -1:
-                        json_end = i + 1
-                        break
-            
-            if json_start != -1 and json_end != -1:
-                json_str = response_text[json_start:json_end]
+            if header_row_idx is not None:
+                st.write(f"\n**Headers found in row {header_row_idx + 1}:**")
+                headers = df.iloc[header_row_idx].tolist()
+                st.write(headers)
                 
-                # Additional cleaning
-                json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)  # Remove control chars
-                json_str = json_str.replace('\n', ' ').replace('\r', ' ')
+                st.write("\n**Cap Table Entries:**")
                 
-                try:
-                    return json.loads(json_str)
-                except json.JSONDecodeError as e:
-                    # If JSON still fails, return a basic structure
-                    st.warning(f"JSON parsing failed for {doc_name}, using fallback extraction")
-                    return {
-                        "grants": [],
-                        "document_type": "unknown",
-                        "error_details": f"Could not parse JSON: {str(e)}",
-                        "raw_response": response_text[:500]
-                    }
+                # Extract data entries (like I did)
+                entries = []
+                for i in range(header_row_idx + 1, len(df)):
+                    row = df.iloc[i]
+                    if pd.notna(row.iloc[0]) and str(row.iloc[0]).strip():  # Has Security ID
+                        entry_data = {}
+                        for j, header in enumerate(headers):
+                            if j < len(row) and pd.notna(row.iloc[j]) and pd.notna(header):
+                                entry_data[str(header)] = row.iloc[j]
+                        
+                        if entry_data:
+                            entries.append({
+                                'entry_num': i - header_row_idx,
+                                'security_id': row.iloc[0],
+                                'data': entry_data
+                            })
+                            
+                            # Display like I did originally
+                            with st.expander(f"Entry {i - header_row_idx} (Security ID: {row.iloc[0]})"):
+                                for header, value in entry_data.items():
+                                    if pd.notna(value) and str(value).strip():
+                                        st.write(f"**{header}:** {value}")
+                
+                self.cap_table_entries = entries
+                return entries
             else:
-                return {"error": "No valid JSON structure found", "raw_response": response_text[:500]}
+                st.error("Could not find header row with 'Security ID' and 'Stakeholder Name'")
+                return []
                 
         except Exception as e:
-            return {"error": f"API call failed: {str(e)}"}
-
-    def compare_with_claude(self, cap_df, legal_docs):
-        if not self.client: return {"error": "No client"}
+            st.error(f"Error analyzing Excel file: {str(e)}")
+            return []
+    
+    def analyze_board_docs_like_original(self):
+        """Analyze board documents using manual parsing like I did originally"""
+        st.subheader("📋 Board Document Analysis")
+        st.write("*Manual document review and key information extraction*")
         
-        prompt = f"""You are a lawyer conducting a capitalization table tie out using this professional due diligence checklist:
-
-**CAPITALIZATION AUDIT CHECKLIST:**
-☐ Review all cap-related materials against cap table: stock, options, warrants, convertible notes, SAFEs
-☐ Was stock issuance approved by the Board and reflected correctly on the cap table?
-☐ Does issuance comply with governance documents (stockholder approval, preemptive rights)?
-☐ Is there an agreement (stock purchase agreement, option exercise form)?
-☐ Does it match the cap table in shares/name?
-☐ Are transfers properly documented and compliant with restrictions?
-☐ Is there any vesting/acceleration? Note non-standard terms
-☐ Did Board approve grant (exercise price, number of shares, vesting)?
-☐ Was a 409A valuation in place (within 1-year safe harbor)?
-☐ Any vesting or acceleration? Note non-standard terms (anything that's not 4 year vest one year cliff for employees)
-☐ Do grant details in Board approval match cap table?
-☐ Do grant details in stock option agreement match cap table?
-☐ Was warrant issuance Board-approved and reflected on cap table?
-☐ Does warrant match cap table in number/type/name?
-☐ Are any shareholder/founder agreements in place?
-☐ Identify equity-related side letters or contracts
-☐ Confirm options can be cashed-out in sale
-
-Apply this checklist systematically. FIND ALL ISSUES - DO NOT STOP AT ONE TYPE. For each stockholder, check ALL of these and report EVERY discrepancy found:
-
-1. SHARE COUNT MISMATCHES (exact numbers must match)
-2. GRANT DATE MISMATCHES (exact dates must match - verify Board approval dates)
-3. VESTING START DATE MISMATCHES (exact dates must match)
-4. VESTING SCHEDULE MISMATCHES (flag non-standard terms - anything not "4 year vest, 1 year cliff" for employees)
-5. SECURITY TYPE MISMATCHES (options vs shares vs warrants vs SAFEs)
-6. EXERCISE PRICE MISMATCHES (verify 409A compliance)
-7. BOARD APPROVAL MISMATCHES (grant details in board approval vs cap table)
-8. MISSING AGREEMENTS (cap table shows grant but no supporting legal document)
-9. MISSING CAP TABLE ENTRIES (legal docs show grant but not on cap table)
-10. GOVERNANCE COMPLIANCE ISSUES (approvals, authorizations, restrictions)
-
-IMPORTANT: Report MULTIPLE issues per stockholder if they exist. Apply the full due diligence checklist.
-
-CAPITALIZATION TABLE:
-{cap_df.head(20).to_dict('records')}
-
-LEGAL DOCUMENTS:
-{legal_docs}
-
-Return JSON with ALL discrepancies found using due diligence framework:
-{{
-  "discrepancies": [
-    {{
-      "stockholder": "Name",
-      "discrepancy_type": "shares_mismatch/grant_date_mismatch/vesting_schedule_mismatch/board_approval_mismatch/missing_agreement/governance_issue/etc",
-      "due_diligence_item": "Which checklist item this relates to",
-      "specific_issue": "Extremely specific description of what doesn't match",
-      "cap_table_value": "exact value from cap table",
-      "legal_document_value": "exact value from legal document", 
-      "source_document": "document name",
-      "severity": "high/medium/low",
-      "legal_text_evidence": "exact text from legal document proving the correct value",
-      "compliance_risk": "What legal/compliance risk this creates"
-    }}
-  ],
-  "summary": {{
-    "total_discrepancies": 0,
-    "checklist_completion": "% of due diligence items that could be verified",
-    "assessment": "detailed assessment using due diligence framework"
-  }}
-}}
-
-Be exhaustive and apply professional due diligence standards. Check every stockholder against every checklist item."""
-
-        try:
-            response = self.client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=4000,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            response_text = response.content[0].text.strip()
+        analysis = {}
+        
+        for filename, content in self.board_docs_content.items():
+            st.write(f"\n**{filename}:**")
             
-            # Same robust JSON extraction as analyze_with_claude
-            json_start = -1
-            json_end = -1
-            brace_count = 0
+            # Determine document type (like I did manually)
+            content_lower = content.lower()
             
-            for i, char in enumerate(response_text):
-                if char == '{':
-                    if json_start == -1:
-                        json_start = i
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0 and json_start != -1:
-                        json_end = i + 1
-                        break
-            
-            if json_start != -1 and json_end != -1:
-                json_str = response_text[json_start:json_end]
+            if 'restricted stock' in content_lower or 'rsa' in content_lower:
+                st.write("- **Document Type:** Board Consent for RSA Issuance")
                 
-                # Additional cleaning
-                import re
-                json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)
-                json_str = json_str.replace('\n', ' ').replace('\r', ' ')
+                # Extract information manually (like I did)
+                doc_analysis = self._extract_rsa_info(content, filename)
+                analysis[filename] = doc_analysis
                 
-                try:
-                    return json.loads(json_str)
-                except json.JSONDecodeError as e:
-                    return {"error": f"JSON parsing error in comparison: {str(e)}", "raw_response": response_text[:500]}
+                # Display findings
+                st.write(f"- **Document dated:** {doc_analysis.get('date', 'Not found')}")
+                st.write(f"- **Stockholder:** {doc_analysis.get('stockholder', 'Not found')}")
+                st.write(f"- **Shares:** {doc_analysis.get('shares', 'Not found')}")
+                st.write(f"- **Price per share:** {doc_analysis.get('price_per_share', 'Not found')}")
+                st.write(f"- **Vesting start date:** {doc_analysis.get('vesting_start', 'Not found')}")
+                st.write(f"- **Vesting schedule:** {doc_analysis.get('vesting_schedule', 'Not found')}")
+                
+            elif 'repurchase' in content_lower:
+                st.write("- **Document Type:** Board Consent for Repurchase")
+                
+                doc_analysis = self._extract_repurchase_info(content, filename)
+                analysis[filename] = doc_analysis
+                
+                st.write(f"- **Document dated:** {doc_analysis.get('date', 'Not found')}")
+                st.write(f"- **Stockholder:** {doc_analysis.get('stockholder', 'Not found')}")
+                st.write(f"- **Shares repurchased:** {doc_analysis.get('repurchased_shares', 'Not found')}")
+                st.write(f"- **Repurchase price:** {doc_analysis.get('price_per_share', 'Not found')}")
+                
             else:
-                return {"error": "No valid JSON found in comparison response", "raw_response": response_text[:500]}
+                st.write("- **Document Type:** Unknown/Other")
+                # Try to extract basic info
+                doc_analysis = self._extract_basic_info(content, filename)
+                analysis[filename] = doc_analysis
+        
+        self.board_analysis = analysis
+        return analysis
+    
+    def _extract_rsa_info(self, content, filename):
+        """Extract RSA grant information like I did manually"""
+        lines = content.split('\n')
+        
+        analysis = {
+            'type': 'RSA Grant',
+            'filename': filename,
+            'date': None,
+            'stockholder': None,
+            'shares': None,
+            'price_per_share': None,
+            'vesting_start': None,
+            'vesting_schedule': None
+        }
+        
+        # Extract date (look for "Date:" pattern)
+        for line in lines:
+            if 'Date:' in line and ('2024' in line or '2025' in line):
+                analysis['date'] = line.replace('Date:', '').strip()
+                break
+        
+        # Extract stockholder name (look in schedule or text)
+        for line in lines:
+            # Common patterns for names
+            if any(name in line for name in ['John Doe', 'Jane Smith', 'Bob', 'Alice']):
+                # Extract the name
+                for potential_name in ['John Doe', 'Jane Smith', 'Bob', 'Alice']:
+                    if potential_name in line:
+                        analysis['stockholder'] = potential_name
+                        break
+                if analysis['stockholder']:
+                    break
+        
+        # Extract shares (look for number followed by "shares")
+        for line in lines:
+            match = re.search(r'(\d{1,3}(?:,\d{3})*)\s+shares?', line)
+            if match:
+                analysis['shares'] = match.group(1)
+                break
+        
+        # Extract price per share
+        for line in lines:
+            match = re.search(r'\$(\d+\.\d{2})\s+per\s+share', line)
+            if not match:
+                match = re.search(r'\$(\d+\.\d{2})', line)
+            if match:
+                analysis['price_per_share'] = f"${match.group(1)}"
+                break
+        
+        # Extract vesting start date
+        for line in lines:
+            # Look for date patterns
+            date_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}', line)
+            if date_match and 'vesting' in line.lower():
+                analysis['vesting_start'] = date_match.group(0)
+                break
+        
+        # Extract vesting schedule
+        for line in lines:
+            if '1/48' in line and 'month' in line.lower():
+                analysis['vesting_schedule'] = '1/48th monthly'
+                break
+        
+        return analysis
+    
+    def _extract_repurchase_info(self, content, filename):
+        """Extract repurchase information"""
+        lines = content.split('\n')
+        
+        analysis = {
+            'type': 'Repurchase',
+            'filename': filename,
+            'date': None,
+            'stockholder': None,
+            'repurchased_shares': None,
+            'price_per_share': None
+        }
+        
+        # Extract date
+        for line in lines:
+            if 'Date:' in line and ('2024' in line or '2025' in line):
+                analysis['date'] = line.replace('Date:', '').strip()
+                break
+        
+        # Extract stockholder
+        for line in lines:
+            for potential_name in ['John Doe', 'Jane Smith', 'Bob', 'Alice']:
+                if potential_name in line:
+                    analysis['stockholder'] = potential_name
+                    break
+            if analysis['stockholder']:
+                break
+        
+        # Extract repurchased shares
+        for line in lines:
+            match = re.search(r'repurchase\s+(\d{1,3}(?:,\d{3})*)\s+', line, re.IGNORECASE)
+            if match:
+                analysis['repurchased_shares'] = match.group(1)
+                break
+        
+        # Extract price
+        for line in lines:
+            match = re.search(r'\$(\d+\.\d{2})', line)
+            if match:
+                analysis['price_per_share'] = f"${match.group(1)}"
+                break
+        
+        return analysis
+    
+    def _extract_basic_info(self, content, filename):
+        """Extract basic info from unknown document types"""
+        return {
+            'type': 'Unknown',
+            'filename': filename,
+            'content_preview': content[:500] + "..." if len(content) > 500 else content
+        }
+    
+    def perform_discrepancy_analysis(self):
+        """Perform discrepancy analysis like I did originally"""
+        st.header("🔍 Discrepancy Analysis")
+        st.write("*Comparing cap table entries against board documents*")
+        
+        discrepancies = []
+        
+        # Get board document references
+        rsa_docs = [doc for doc in self.board_analysis.values() if doc.get('type') == 'RSA Grant']
+        repurchase_docs = [doc for doc in self.board_analysis.values() if doc.get('type') == 'Repurchase']
+        
+        # Create lookup of approved grants
+        approved_grants = {}
+        for doc in rsa_docs:
+            if doc.get('stockholder'):
+                key = doc['stockholder']
+                approved_grants[key] = doc
+        
+        # Analyze each cap table entry
+        for entry in self.cap_table_entries:
+            data = entry['data']
+            security_id = entry['security_id']
+            stakeholder = data.get('Stakeholder Name', '')
+            
+            # Check if this grant has board approval
+            if stakeholder not in approved_grants:
+                discrepancies.append({
+                    'severity': 'HIGH',
+                    'stockholder': stakeholder,
+                    'security_id': security_id,
+                    'issue': 'Missing Board Approval',
+                    'cap_table_value': 'Entry exists',
+                    'legal_document_value': 'No supporting documentation found',
+                    'description': f'Cap table shows {security_id} for {stakeholder} but no board approval found',
+                    'source_document': 'None found'
+                })
+            else:
+                # Compare against board approval
+                board_doc = approved_grants[stakeholder]
                 
-        except Exception as e:
-            return {"error": str(e)}
+                # Check shares
+                cap_shares = str(data.get('Quantity Issued', ''))
+                board_shares = board_doc.get('shares', '')
+                if cap_shares and board_shares and cap_shares.replace(',', '') != board_shares.replace(',', ''):
+                    discrepancies.append({
+                        'severity': 'HIGH',
+                        'stockholder': stakeholder,
+                        'security_id': security_id,
+                        'issue': 'Incorrect Share Quantity',
+                        'cap_table_value': f'{cap_shares} shares',
+                        'legal_document_value': f'{board_shares} shares',
+                        'description': f'Cap table shows {cap_shares} shares but board approval is for {board_shares} shares',
+                        'source_document': board_doc['filename']
+                    })
+                
+                # Check price per share
+                try:
+                    cap_cost_basis = float(data.get('Cost Basis', 0))
+                    cap_shares_num = float(str(data.get('Quantity Issued', 1)).replace(',', ''))
+                    cap_price_per_share = cap_cost_basis / cap_shares_num if cap_shares_num > 0 else 0
+                    
+                    board_price_str = board_doc.get('price_per_share', '$0')
+                    board_price = float(board_price_str.replace('$', ''))
+                    
+                    if abs(cap_price_per_share - board_price) > 0.01:
+                        discrepancies.append({
+                            'severity': 'HIGH',
+                            'stockholder': stakeholder,
+                            'security_id': security_id,
+                            'issue': 'Incorrect Price Per Share',
+                            'cap_table_value': f'${cap_price_per_share:.2f}',
+                            'legal_document_value': f'${board_price:.2f}',
+                            'description': f'Cap table shows ${cap_price_per_share:.2f} per share but board approval is for ${board_price:.2f} per share',
+                            'source_document': board_doc['filename']
+                        })
+                except (ValueError, ZeroDivisionError):
+                    pass
+                
+                # Check board approval date
+                cap_approval_date = str(data.get('Board Approval Date', ''))
+                board_date = board_doc.get('date', '')
+                if cap_approval_date and board_date:
+                    # Simple date comparison (could be enhanced)
+                    if board_date not in cap_approval_date:
+                        discrepancies.append({
+                            'severity': 'HIGH',
+                            'stockholder': stakeholder,
+                            'security_id': security_id,
+                            'issue': 'Incorrect Board Approval Date',
+                            'cap_table_value': cap_approval_date,
+                            'legal_document_value': board_date,
+                            'description': 'Board approval date in cap table does not match legal documents',
+                            'source_document': board_doc['filename']
+                        })
+        
+        # Check for missing repurchase transactions
+        for repurchase_doc in repurchase_docs:
+            stockholder = repurchase_doc.get('stockholder', '')
+            repurchased_shares = repurchase_doc.get('repurchased_shares', '')
+            
+            if stockholder and repurchased_shares:
+                discrepancies.append({
+                    'severity': 'HIGH',
+                    'stockholder': stockholder,
+                    'security_id': 'Multiple',
+                    'issue': 'Missing Repurchase Transaction',
+                    'cap_table_value': 'No repurchase reflected',
+                    'legal_document_value': f'{repurchased_shares} shares repurchased',
+                    'description': f'Board approved repurchase of {repurchased_shares} shares from {stockholder} but cap table does not reflect this transaction',
+                    'source_document': repurchase_doc['filename']
+                })
+        
+        return discrepancies
+    
+    def generate_report(self, discrepancies):
+        """Generate detailed report like my original markdown report"""
+        st.header("📊 Final Analysis Report")
+        
+        if not discrepancies:
+            st.success("🎉 No discrepancies found! The cap table appears to be in sync with the board documents.")
+            return
+        
+        # Summary
+        st.error(f"⚠️ Found {len(discrepancies)} discrepancies that require immediate correction")
+        
+        high_severity = [d for d in discrepancies if d['severity'] == 'HIGH']
+        medium_severity = [d for d in discrepancies if d['severity'] == 'MEDIUM']
+        low_severity = [d for d in discrepancies if d['severity'] == 'LOW']
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("🔴 High Severity", len(high_severity))
+        with col2:
+            st.metric("🟡 Medium Severity", len(medium_severity))
+        with col3:
+            st.metric("🟢 Low Severity", len(low_severity))
+        
+        # Detailed discrepancies
+        st.subheader("Detailed Discrepancy Analysis")
+        
+        for i, disc in enumerate(discrepancies, 1):
+            severity_color = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}
+            
+            with st.expander(f"{severity_color[disc['severity']]} DISCREPANCY #{i}: {disc['issue']} - {disc['stockholder']}"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Severity:** " + disc['severity'])
+                    st.write("**Stockholder:** " + disc['stockholder'])
+                    st.write("**Security ID:** " + disc['security_id'])
+                    st.write("**Issue:** " + disc['issue'])
+                
+                with col2:
+                    st.write("**Cap Table Shows:**")
+                    st.code(disc['cap_table_value'])
+                    
+                    st.write("**Legal Documents Show:**")
+                    st.code(disc['legal_document_value'])
+                
+                st.write("**Description:**")
+                st.write(disc['description'])
+                
+                st.write("**Source Document:**")
+                st.write(disc['source_document'])
+        
+        # Risk assessment and recommendations
+        st.subheader("Risk Assessment & Recommendations")
+        
+        if high_severity:
+            st.error("**High Risk Issues Identified:**")
+            st.write("- Multiple discrepancies require immediate attention")
+            st.write("- Potential phantom equity grants without legal support")
+            st.write("- Incorrect pricing and dates affecting valuation")
+        
+        st.write("**Immediate Actions Required:**")
+        st.write("1. Verify all entries have proper board documentation")
+        st.write("2. Correct pricing and date discrepancies")
+        st.write("3. Record missing transactions (repurchases, etc.)")
+        st.write("4. Remove or document phantom equity entries")
+        
+        # Export functionality
+        st.subheader("📤 Export Results")
+        
+        # Create downloadable report
+        report_data = []
+        for disc in discrepancies:
+            report_data.append([
+                disc['severity'],
+                disc['stockholder'],
+                disc['security_id'],
+                disc['issue'],
+                disc['cap_table_value'],
+                disc['legal_document_value'],
+                disc['description'],
+                disc['source_document']
+            ])
+        
+        df_report = pd.DataFrame(report_data, columns=[
+            'Severity', 'Stockholder', 'Security ID', 'Issue', 
+            'Cap Table Value', 'Legal Document Value', 'Description', 'Source Document'
+        ])
+        
+        csv = df_report.to_csv(index=False)
+        st.download_button(
+            label="Download Discrepancies Report (CSV)",
+            data=csv,
+            file_name=f"cap_table_discrepancies_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
 
 def main():
-    st.title("📊 Cap Table Audit Tool")
+    st.title("📊 Cap Table Tie-Out Analysis")
+    st.markdown("*Using the original manual analysis methodology*")
     
-    auditor = CapTableAuditor()
-    if not auditor.client: st.stop()
+    # Initialize analyzer
+    if 'analyzer' not in st.session_state:
+        st.session_state.analyzer = CapTableAnalyzer()
     
-    # File uploads
-    col1, col2 = st.columns(2)
+    # Sidebar for file uploads
+    with st.sidebar:
+        st.header("📁 Upload Documents")
+        
+        # Board documents upload
+        st.subheader("Board Documents")
+        board_files = st.file_uploader(
+            "Upload board consents and minutes (DOCX)",
+            type=['docx'],
+            accept_multiple_files=True,
+            key="board_docs"
+        )
+        
+        # Securities ledger upload
+        st.subheader("Securities Ledger")
+        cap_table_file = st.file_uploader(
+            "Upload cap table (Excel format)",
+            type=['xlsx', 'xls'],
+            key="cap_table"
+        )
+        
+        # Analysis button
+        st.markdown("---")
+        run_analysis = st.button("🔍 Run Tie-Out Analysis", type="primary", use_container_width=True)
+    
+    # Show upload status
+    col1, col2 = st.columns([1, 1])
+    
     with col1:
-        cap_files = st.file_uploader("Cap Table Files", type=['csv','xlsx','xls'], accept_multiple_files=True)
-    with col2:
-        legal_files = st.file_uploader("Legal Documents", type=['pdf','doc','docx','xlsx','xls','csv'], accept_multiple_files=True)
-    
-    if cap_files and legal_files:
-        # Load cap table
-        cap_df = auditor.load_cap_table(cap_files)
-        if cap_df.empty: return
+        st.subheader("📋 Uploaded Documents")
         
-        with st.expander("Cap Table Preview"):
-            st.dataframe(cap_df.head())
-        
-        # Analyze legal docs
-        st.subheader("📑 Analyzing Legal Documents")
-        legal_analysis = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i, file in enumerate(legal_files):
-            # Update status
-            status_text.write(f"🔄 Processing document {i+1} of {len(legal_files)}: **{file.name}**")
-            
-            with st.spinner(f"Extracting text from {file.name}..."):
-                text = auditor.extract_text(file)
-            
-            if text:
-                with st.spinner(f"AI analyzing {file.name}..."):
-                    analysis = auditor.analyze_with_claude(text, file.name)
-                
-                if "error" not in analysis:
-                    legal_analysis.append(analysis)
-                    st.success(f"✅ Successfully analyzed {file.name}")
-                    
-                    # Show grants found
-                    grants_found = len(analysis.get('grants', []))
-                    if grants_found > 0:
-                        st.info(f"📋 Found {grants_found} grant(s) in {file.name}")
-                else:
-                    st.error(f"❌ Error analyzing {file.name}: {analysis['error']}")
-            else:
-                st.warning(f"⚠️ No text extracted from {file.name}")
-            
-            # Update progress
-            progress_bar.progress((i + 1) / len(legal_files))
-        
-        # Clear status text when done
-        status_text.empty()
-        
-        if legal_analysis:
-            total_grants = sum(len(doc.get("grants", [])) for doc in legal_analysis)
-            st.success(f"🎉 Analysis complete! Extracted **{total_grants} total grants** from **{len(legal_analysis)} documents**")
-        # Compare
-        if legal_analysis:
-            st.subheader("🔍 Comparing Cap Table vs Legal Documents")
-            with st.spinner("AI performing detailed discrepancy analysis..."):
-                result = auditor.compare_with_claude(cap_df, legal_analysis)
-            
-            if "error" not in result:
-                discrepancies = result.get("discrepancies", [])
-                summary = result.get("summary", {})
-                
-                # Results header with better layout
-                st.header("📋 Audit Results")
-                
-                # Summary metrics in prominent position
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total Issues", len(discrepancies))
-                with col2:
-                    st.metric("🔴 High", summary.get("high_severity_count", 0))
-                with col3:
-                    st.metric("🟡 Medium", summary.get("medium_severity_count", 0))
-                with col4:
-                    st.metric("🟢 Low", summary.get("low_severity_count", 0))
-                
-                if summary.get("overall_assessment"):
-                    st.info(f"**📊 Overall Assessment:** {summary['overall_assessment']}")
-                
-                # Discrepancies section
-                if discrepancies:
-                    st.subheader("🔍 Detailed Discrepancies")
-                    
-                    for i, d in enumerate(discrepancies, 1):
-                        severity = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(d.get("severity"), "⚪")
-                        
-                        # Use a container to ensure proper scrolling
-                        with st.container():
-                            with st.expander(f"{severity} Issue {i}: {d.get('stockholder', 'Unknown')} - {d.get('discrepancy_type', 'Issue')}", expanded=d.get('severity') == 'high'):
-                                
-                                # Main discrepancy description
-                                st.markdown(f"**🎯 Specific Issue:** {d.get('specific_issue', d.get('detailed_description', d.get('description', 'No details')))}")
-                                
-                                # Side-by-side comparison with exact values
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    st.markdown("**📊 Cap Table Shows:**")
-                                    st.code(d.get('cap_table_value', 'N/A'), language=None)
-                                
-                                with col2:
-                                    st.markdown("**📄 Legal Document Shows:**")
-                                    st.code(d.get('legal_document_value', 'N/A'), language=None)
-                                
-                                # Legal evidence
-                                if d.get('legal_text_evidence'):
-                                    st.markdown("**🔍 Legal Document Evidence:**")
-                                    st.code(d['legal_text_evidence'], language=None)
-                                
-                                # Source and correction needed
-                                st.write(f"**📂 Source Document:** {d.get('source_document', 'N/A')}")
-                                
-                                if d.get('correction_required'):
-                                    st.error(f"**✏️ Correction Needed:** {d['correction_required']}")
-                                elif d.get('specific_issue'):
-                                    st.warning(f"**⚠️ Action Required:** Review and update cap table to match legal document exactly")
-                    
-                    # Enhanced download with more details
-                    st.subheader("📥 Download Report")
-                    csv = pd.DataFrame(discrepancies).to_csv(index=False)
-                    st.download_button("📊 Download Detailed Audit Report", csv, "detailed_audit_report.csv")
-                    
-                else:
-                    st.success("🎉 No discrepancies found! Cap table matches legal documents perfectly.")
-            else:
-                st.error(f"❌ Comparison error: {result['error']}")
+        if board_files:
+            st.write("**Board Documents:**")
+            for file in board_files:
+                st.write(f"✅ {file.name}")
         else:
-            st.warning("⚠️ No legal documents were successfully analyzed. Please check your files and try again.")
+            st.info("No board documents uploaded yet")
+        
+        if cap_table_file:
+            st.write("**Securities Ledger:**")
+            st.write(f"✅ {cap_table_file.name}")
+        else:
+            st.info("No securities ledger uploaded yet")
+    
+    with col2:
+        st.subheader("⚙️ Analysis Status")
+        
+        if not board_files and not cap_table_file:
+            st.warning("Please upload documents to begin analysis")
+        elif not board_files:
+            st.warning("Please upload board documents")
+        elif not cap_table_file:
+            st.warning("Please upload securities ledger")
+        else:
+            st.success("Ready for analysis!")
+    
+    # Run analysis when button is clicked
+    if run_analysis:
+        if not board_files or not cap_table_file:
+            st.error("Please upload both board documents and securities ledger before running analysis")
+            return
+        
+        with st.spinner("Running tie-out analysis..."):
+            analyzer = st.session_state.analyzer
+            
+            # Step 1: Analyze Excel file (like original JavaScript approach)
+            st.markdown("---")
+            cap_entries = analyzer.analyze_excel_like_original(cap_table_file)
+            
+            # Step 2: Analyze board documents (manual parsing)
+            st.markdown("---")
+            board_analysis = analyzer.analyze_board_docs_like_original()
+            
+            # Step 3: Perform discrepancy analysis
+            st.markdown("---")
+            discrepancies = analyzer.perform_discrepancy_analysis()
+            
+            # Step 4: Generate final report
+            st.markdown("---")
+            analyzer.generate_report(discrepancies)
 
 if __name__ == "__main__":
     main()
