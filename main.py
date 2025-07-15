@@ -1,18 +1,4 @@
-def analyze_with_claude(self, text, doc_name):
-        if not self.client: return {"error": "No client"}
-        
-        # Clean text
-        import re
-        clean_text = re.sub(r'[^\w\s\-\.\,\:\;\(\)\[\]\/]', ' ', text)
-        clean_text = ' '.join(clean_text.split())
-        
-        # Single, optimized prompt
-        prompt = f"""Extract grants from {doc_name}:
-
-{clean_text[:6000]}
-
-Return JSON only:
-{{"grants": [{{"stockholder": "name", "shares": "number", "grant_date": "YYYY-MM-DD", "vesting_schedule": "description"}}], "document_type": "board_consent"import streamlit as st
+import streamlit as st
 import pandas as pd
 import pdfplumber
 import anthropic
@@ -85,48 +71,95 @@ class CapTableAuditor:
     def analyze_with_claude(self, text, doc_name):
         if not self.client: return {"error": "No client"}
         
-        # Simple text cleaning
-        clean_text = text.replace('"', "'").replace('\n', ' ')[:8000]
+        # More aggressive text cleaning
+        import re
+        clean_text = re.sub(r'[^\w\s\-\.\,\:\;\(\)\[\]\/]', ' ', text)  # Remove special chars
+        clean_text = ' '.join(clean_text.split())  # Normalize whitespace
         
-        prompt = f"""Extract grant information from this legal document. Return valid JSON only.
+        prompt = f"""You are a lawyer conducting a capitalization table tie out. Analyze this document and extract EXACT grant details.
 
 Document: {doc_name}
-Text: {clean_text}
+Content: {clean_text[:8000]}
 
+Extract PRECISE details for each grant, even if some information is missing or incomplete:
+- Stockholder name (even if partial)
+- EXACT share count if available
+- Grant date if available (board consent: LAST signature date; board minutes: meeting date)
+- Vesting start date if available
+- DETAILED vesting schedule if available (e.g., "1/48th monthly over 4 years")
+- Security type if available
+- Exercise price if available
+
+IMPORTANT: If some fields are missing or unclear, still extract what you can find. Mark missing fields as "not specified" or "unclear from document".
+
+Return JSON - include grants even if incomplete:
 {{
   "grants": [
     {{
-      "stockholder": "name",
-      "shares": "number", 
-      "grant_date": "YYYY-MM-DD",
-      "vesting_schedule": "description"
+      "stockholder": "Full Name or partial name if available",
+      "shares": "exact_number or 'not specified'",
+      "grant_date": "YYYY-MM-DD or 'not specified'",
+      "vesting_start": "YYYY-MM-DD or 'not specified'",
+      "vesting_schedule_detailed": "exact vesting description or 'not specified'",
+      "security_type": "options/shares/warrant or 'not specified'",
+      "exercise_price": "price or 'not specified'",
+      "source_text": "relevant text from document",
+      "completeness": "complete/partial/minimal"
     }}
-  ]
+  ],
+  "document_type": "board_consent",
+  "extraction_notes": "Any issues or missing information noted"
 }}"""
 
         try:
             response = self.client.messages.create(
                 model="claude-3-5-sonnet-20241022",
-                max_tokens=1500,
+                max_tokens=2000,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}]
             )
             
-            text = response.content[0].text
+            response_text = response.content[0].text.strip()
             
-            # Simple JSON extraction
-            start = text.find('{')
-            end = text.rfind('}') + 1
+            # Find JSON boundaries more carefully
+            json_start = -1
+            json_end = -1
+            brace_count = 0
             
-            if start != -1 and end != -1:
-                json_str = text[start:end]
-                return json.loads(json_str)
+            for i, char in enumerate(response_text):
+                if char == '{':
+                    if json_start == -1:
+                        json_start = i
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0 and json_start != -1:
+                        json_end = i + 1
+                        break
+            
+            if json_start != -1 and json_end != -1:
+                json_str = response_text[json_start:json_end]
+                
+                # Additional cleaning
+                json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)  # Remove control chars
+                json_str = json_str.replace('\n', ' ').replace('\r', ' ')
+                
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    # If JSON still fails, return a basic structure
+                    st.warning(f"JSON parsing failed for {doc_name}, using fallback extraction")
+                    return {
+                        "grants": [],
+                        "document_type": "unknown",
+                        "error_details": f"Could not parse JSON: {str(e)}",
+                        "raw_response": response_text[:500]
+                    }
             else:
-                # Basic fallback
-                return {"grants": [], "document_type": "unknown", "note": "Could not extract JSON"}
+                return {"error": "No valid JSON structure found", "raw_response": response_text[:500]}
                 
         except Exception as e:
-            return {"grants": [], "document_type": "unknown", "error": str(e)}
+            return {"error": f"API call failed: {str(e)}"}
 
     def compare_with_claude(self, cap_df, legal_docs):
         if not self.client: return {"error": "No client"}
