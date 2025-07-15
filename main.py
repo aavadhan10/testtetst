@@ -1,4 +1,18 @@
-import streamlit as st
+def analyze_with_claude(self, text, doc_name):
+        if not self.client: return {"error": "No client"}
+        
+        # Clean text
+        import re
+        clean_text = re.sub(r'[^\w\s\-\.\,\:\;\(\)\[\]\/]', ' ', text)
+        clean_text = ' '.join(clean_text.split())
+        
+        # Single, optimized prompt
+        prompt = f"""Extract grants from {doc_name}:
+
+{clean_text[:6000]}
+
+Return JSON only:
+{{"grants": [{{"stockholder": "name", "shares": "number", "grant_date": "YYYY-MM-DD", "vesting_schedule": "description"}}], "document_type": "board_consent"import streamlit as st
 import pandas as pd
 import pdfplumber
 import anthropic
@@ -71,128 +85,48 @@ class CapTableAuditor:
     def analyze_with_claude(self, text, doc_name):
         if not self.client: return {"error": "No client"}
         
-        # More aggressive text cleaning
-        import re
-        clean_text = re.sub(r'[^\w\s\-\.\,\:\;\(\)\[\]\/]', ' ', text)
-        clean_text = ' '.join(clean_text.split())
+        # Simple text cleaning
+        clean_text = text.replace('"', "'").replace('\n', ' ')[:8000]
         
-        # Try multiple approaches for better consistency
-        prompts = [
-            # Approach 1: Detailed extraction
-            f"""Extract grant information from: {doc_name}
+        prompt = f"""Extract grant information from this legal document. Return valid JSON only.
 
-{clean_text[:6000]}
+Document: {doc_name}
+Text: {clean_text}
 
-Return only this JSON structure:
-{{"grants": [{{"stockholder": "name", "shares": "number", "grant_date": "YYYY-MM-DD", "vesting_schedule": "description"}}], "document_type": "type"}}""",
+{{
+  "grants": [
+    {{
+      "stockholder": "name",
+      "shares": "number", 
+      "grant_date": "YYYY-MM-DD",
+      "vesting_schedule": "description"
+    }}
+  ]
+}}"""
+
+        try:
+            response = self.client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=1500,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}]
+            )
             
-            # Approach 2: Simple extraction (fallback)
-            f"""Find grants in this document. Return JSON:
-{{"grants": [list of grants found], "document_type": "board_consent"}}
-
-Text: {clean_text[:4000]}""",
+            text = response.content[0].text
             
-            # Approach 3: Minimal extraction (last resort)
-            f"""Extract any equity grants. Simple JSON only:
-{{"grants": [], "document_type": "unknown"}}
-
-From: {clean_text[:2000]}"""
-        ]
-        
-        for i, prompt in enumerate(prompts):
-            try:
-                response = self.client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
-                    max_tokens=2000,
-                    temperature=0,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                
-                response_text = response.content[0].text.strip()
-                
-                # Multiple JSON extraction methods
-                extraction_methods = [
-                    self._extract_json_brackets,
-                    self._extract_json_regex,
-                    self._extract_json_lines
-                ]
-                
-                for method in extraction_methods:
-                    try:
-                        result = method(response_text)
-                        if result and "grants" in result:
-                            result["extraction_method"] = f"approach_{i+1}_method_{extraction_methods.index(method)+1}"
-                            return result
-                    except:
-                        continue
-                        
-            except Exception as e:
-                if i == len(prompts) - 1:  # Last attempt
-                    return {"error": f"All extraction attempts failed: {str(e)}", "document": doc_name}
-                continue
-        
-        return {"error": "All approaches failed", "grants": [], "document_type": "unknown"}
-    
-    def _extract_json_brackets(self, text):
-        """Method 1: Bracket counting"""
-        json_start = -1
-        json_end = -1
-        brace_count = 0
-        
-        for i, char in enumerate(text):
-            if char == '{':
-                if json_start == -1:
-                    json_start = i
-                brace_count += 1
-            elif char == '}':
-                brace_count -= 1
-                if brace_count == 0 and json_start != -1:
-                    json_end = i + 1
-                    break
-        
-        if json_start != -1 and json_end != -1:
-            json_str = text[json_start:json_end]
-            json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)
-            return json.loads(json_str)
-        return None
-    
-    def _extract_json_regex(self, text):
-        """Method 2: Regex extraction"""
-        import re
-        pattern = r'\{.*?"grants".*?\}|\{.*?\}'
-        matches = re.findall(pattern, text, re.DOTALL)
-        for match in matches:
-            try:
-                cleaned = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', match)
-                result = json.loads(cleaned)
-                if "grants" in result:
-                    return result
-            except:
-                continue
-        return None
-    
-    def _extract_json_lines(self, text):
-        """Method 3: Line-by-line extraction"""
-        lines = text.split('\n')
-        json_lines = []
-        in_json = False
-        
-        for line in lines:
-            if '{' in line:
-                in_json = True
-            if in_json:
-                json_lines.append(line)
-            if '}' in line and in_json:
-                break
-        
-        if json_lines:
-            json_str = ' '.join(json_lines)
-            json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)
-            try:
+            # Simple JSON extraction
+            start = text.find('{')
+            end = text.rfind('}') + 1
+            
+            if start != -1 and end != -1:
+                json_str = text[start:end]
                 return json.loads(json_str)
-            except:
-                pass
-        return None
+            else:
+                # Basic fallback
+                return {"grants": [], "document_type": "unknown", "note": "Could not extract JSON"}
+                
+        except Exception as e:
+            return {"grants": [], "document_type": "unknown", "error": str(e)}
 
     def compare_with_claude(self, cap_df, legal_docs):
         if not self.client: return {"error": "No client"}
