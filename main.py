@@ -73,91 +73,126 @@ class CapTableAuditor:
         
         # More aggressive text cleaning
         import re
-        clean_text = re.sub(r'[^\w\s\-\.\,\:\;\(\)\[\]\/]', ' ', text)  # Remove special chars
-        clean_text = ' '.join(clean_text.split())  # Normalize whitespace
+        clean_text = re.sub(r'[^\w\s\-\.\,\:\;\(\)\[\]\/]', ' ', text)
+        clean_text = ' '.join(clean_text.split())
         
-        prompt = f"""You are a lawyer conducting a capitalization table tie out. Analyze this document and extract EXACT grant details.
+        # Try multiple approaches for better consistency
+        prompts = [
+            # Approach 1: Detailed extraction
+            f"""Extract grant information from: {doc_name}
 
-Document: {doc_name}
-Content: {clean_text[:8000]}
+{clean_text[:6000]}
 
-Extract PRECISE details for each grant:
-- Stockholder name
-- EXACT share count (e.g., "10000", "5000")
-- Grant date (board consent: LAST signature date; board minutes: meeting date)
-- Vesting start date
-- DETAILED vesting schedule (e.g., "1/48th monthly over 4 years", "25% after 1 year then 1/36th monthly", "100% immediate")
-- Security type
-- Exercise price if applicable
-- Any other specific terms
-
-IMPORTANT: Return ONLY valid JSON. Be extremely specific with vesting schedules.
-
-{{
-  "grants": [
-    {{
-      "stockholder": "Full Name",
-      "shares": "exact_number",
-      "grant_date": "YYYY-MM-DD",
-      "vesting_start": "YYYY-MM-DD",
-      "vesting_schedule_detailed": "exact vesting description from document",
-      "security_type": "options/shares/warrant",
-      "exercise_price": "price_if_applicable",
-      "source_text": "relevant text from document showing these details"
-    }}
-  ],
-  "document_type": "board_consent"
-}}"""
-
-        try:
-            response = self.client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=2000,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}]
-            )
+Return only this JSON structure:
+{{"grants": [{{"stockholder": "name", "shares": "number", "grant_date": "YYYY-MM-DD", "vesting_schedule": "description"}}], "document_type": "type"}}""",
             
-            response_text = response.content[0].text.strip()
+            # Approach 2: Simple extraction (fallback)
+            f"""Find grants in this document. Return JSON:
+{{"grants": [list of grants found], "document_type": "board_consent"}}
+
+Text: {clean_text[:4000]}""",
             
-            # Find JSON boundaries more carefully
-            json_start = -1
-            json_end = -1
-            brace_count = 0
-            
-            for i, char in enumerate(response_text):
-                if char == '{':
-                    if json_start == -1:
-                        json_start = i
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0 and json_start != -1:
-                        json_end = i + 1
-                        break
-            
-            if json_start != -1 and json_end != -1:
-                json_str = response_text[json_start:json_end]
+            # Approach 3: Minimal extraction (last resort)
+            f"""Extract any equity grants. Simple JSON only:
+{{"grants": [], "document_type": "unknown"}}
+
+From: {clean_text[:2000]}"""
+        ]
+        
+        for i, prompt in enumerate(prompts):
+            try:
+                response = self.client.messages.create(
+                    model="claude-3-5-sonnet-20241022",
+                    max_tokens=2000,
+                    temperature=0,
+                    messages=[{"role": "user", "content": prompt}]
+                )
                 
-                # Additional cleaning
-                json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)  # Remove control chars
-                json_str = json_str.replace('\n', ' ').replace('\r', ' ')
+                response_text = response.content[0].text.strip()
                 
-                try:
-                    return json.loads(json_str)
-                except json.JSONDecodeError as e:
-                    # If JSON still fails, return a basic structure
-                    st.warning(f"JSON parsing failed for {doc_name}, using fallback extraction")
-                    return {
-                        "grants": [],
-                        "document_type": "unknown",
-                        "error_details": f"Could not parse JSON: {str(e)}",
-                        "raw_response": response_text[:500]
-                    }
-            else:
-                return {"error": "No valid JSON structure found", "raw_response": response_text[:500]}
+                # Multiple JSON extraction methods
+                extraction_methods = [
+                    self._extract_json_brackets,
+                    self._extract_json_regex,
+                    self._extract_json_lines
+                ]
                 
-        except Exception as e:
-            return {"error": f"API call failed: {str(e)}"}
+                for method in extraction_methods:
+                    try:
+                        result = method(response_text)
+                        if result and "grants" in result:
+                            result["extraction_method"] = f"approach_{i+1}_method_{extraction_methods.index(method)+1}"
+                            return result
+                    except:
+                        continue
+                        
+            except Exception as e:
+                if i == len(prompts) - 1:  # Last attempt
+                    return {"error": f"All extraction attempts failed: {str(e)}", "document": doc_name}
+                continue
+        
+        return {"error": "All approaches failed", "grants": [], "document_type": "unknown"}
+    
+    def _extract_json_brackets(self, text):
+        """Method 1: Bracket counting"""
+        json_start = -1
+        json_end = -1
+        brace_count = 0
+        
+        for i, char in enumerate(text):
+            if char == '{':
+                if json_start == -1:
+                    json_start = i
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0 and json_start != -1:
+                    json_end = i + 1
+                    break
+        
+        if json_start != -1 and json_end != -1:
+            json_str = text[json_start:json_end]
+            json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)
+            return json.loads(json_str)
+        return None
+    
+    def _extract_json_regex(self, text):
+        """Method 2: Regex extraction"""
+        import re
+        pattern = r'\{.*?"grants".*?\}|\{.*?\}'
+        matches = re.findall(pattern, text, re.DOTALL)
+        for match in matches:
+            try:
+                cleaned = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', match)
+                result = json.loads(cleaned)
+                if "grants" in result:
+                    return result
+            except:
+                continue
+        return None
+    
+    def _extract_json_lines(self, text):
+        """Method 3: Line-by-line extraction"""
+        lines = text.split('\n')
+        json_lines = []
+        in_json = False
+        
+        for line in lines:
+            if '{' in line:
+                in_json = True
+            if in_json:
+                json_lines.append(line)
+            if '}' in line and in_json:
+                break
+        
+        if json_lines:
+            json_str = ' '.join(json_lines)
+            json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)
+            try:
+                return json.loads(json_str)
+            except:
+                pass
+        return None
 
     def compare_with_claude(self, cap_df, legal_docs):
         if not self.client: return {"error": "No client"}
