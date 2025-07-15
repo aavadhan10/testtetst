@@ -125,24 +125,14 @@ def main():
     st.title("📊 Cap Table Tie-Out Analysis")
     st.markdown("*LLM-powered analysis replicating expert legal review*")
     
-    # API Key input
-    with st.sidebar:
-        st.header("🔧 Configuration")
-        api_key = st.text_input(
-            "Anthropic API Key", 
-            type="password",
-            help="Enter your Anthropic API key to enable LLM analysis"
-        )
-        
-        if api_key:
-            st.success("✅ API Key configured")
-        else:
-            st.warning("⚠️ Enter API key to proceed")
-    
-    # Initialize analyzer
-    if api_key:
-        if 'analyzer' not in st.session_state:
+    # Initialize analyzer with API key from secrets
+    if 'analyzer' not in st.session_state:
+        try:
+            api_key = st.secrets["ANTHROPIC_API_KEY"]
             st.session_state.analyzer = LLMCapTableAnalyzer(api_key)
+        except KeyError:
+            st.error("❌ Anthropic API key not found in Streamlit secrets. Please configure ANTHROPIC_API_KEY in your .streamlit/secrets.toml file")
+            st.stop()
     
     # File upload section
     with st.sidebar:
@@ -172,8 +162,7 @@ def main():
         run_analysis = st.button(
             "🔍 Run LLM Tie-Out Analysis", 
             type="primary", 
-            use_container_width=True,
-            disabled=not api_key
+            use_container_width=True
         )
     
     # Main content area
@@ -216,9 +205,7 @@ def main():
     with col2:
         st.subheader("⚙️ Analysis Status")
         
-        if not api_key:
-            st.error("🔑 Please enter your Anthropic API key")
-        elif not board_files and not cap_table_file:
+        if not board_files and not cap_table_file:
             st.warning("📄 Please upload documents to begin analysis")
         elif not board_files:
             st.warning("📋 Please upload board documents")
@@ -230,10 +217,6 @@ def main():
     
     # Run analysis when button is clicked
     if run_analysis:
-        if not api_key:
-            st.error("Please enter your Anthropic API key first")
-            return
-            
         if not board_files or not cap_table_file:
             st.error("Please upload both board documents and securities ledger before running analysis")
             return
@@ -309,7 +292,7 @@ ANALYSIS RESULTS:
         - Finds missing transactions (repurchases, etc.)
         - Provides severity assessment and recommendations
         
-        **API Key**: You need an Anthropic API key to use this tool. Get one at https://console.anthropic.com
+        **API Key**: Configured via Streamlit secrets (ANTHROPIC_API_KEY in .streamlit/secrets.toml)
         """)
     
     # Footer
