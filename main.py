@@ -59,45 +59,53 @@ class LLMCapTableAnalyzer:
             return f"Error reading Excel file {filename}: {str(e)}"
     
     def create_analysis_prompt(self, board_docs: Dict[str, str], cap_table_text: str) -> str:
-        """Create the enhanced prompt that catches all discrepancies"""
+        """Create the enhanced prompt that catches all discrepancies with standardized approach"""
         
-        prompt = """You are a lawyer conducting a comprehensive capitalization table tie out of a company on behalf of an investor. You must be extremely thorough and catch EVERY discrepancy, no matter how small.
+        prompt = """You are a lawyer conducting a standardized capitalization table tie out. You MUST follow this exact sequence:
 
-CRITICAL INSTRUCTIONS:
-1. Compare the company's capitalization table against the legal documents. The legal documents are the ultimate source of truth.
+MANDATORY ANALYSIS SEQUENCE:
+1. DOCUMENT INVENTORY: List every board document and what it approves
+2. CAP TABLE INVENTORY: List every cap table entry (Security ID, Stockholder, Shares)
+3. SYSTEMATIC COMPARISON: For each cap table entry, check against board docs
+4. DISCREPANCY IDENTIFICATION: List each discrepancy separately with exact format
 
-2. For EACH stockholder's grant in the capitalization table, verify:
-   - Grant date matches board approval date
-   - Number of shares issued matches board approval
-   - Price per share is correct (calculate from cost basis ÷ shares)
-   - Vesting start date matches board documents
-   - Vesting schedule matches board documents
-   - Issue date matches board approval date
-   - Board approval date is accurate
+STEP 1 - DOCUMENT INVENTORY:
+First, create a complete list of all board-approved grants from legal documents:
+- Document name, date, stockholder, shares, price, vesting details
 
-3. PHANTOM EQUITY DETECTION:
-   - Flag ANY cap table entry that lacks supporting board documentation
-   - Every grant must have a corresponding board consent, resolution, or legal document
-   - If you cannot find board approval for a grant, it's a HIGH severity phantom equity issue
+STEP 2 - CAP TABLE INVENTORY: 
+List every entry in the cap table:
+- Security ID, Stockholder Name, Quantity, Price details, Dates
 
-4. VESTING SCHEDULE VERIFICATION:
-   - Check if vesting schedule format matches between cap table and board documents
-   - Look for discrepancies like "monthly" vs "annual" vesting
-   - Flag if board says "1/48th monthly" but cap table shows different vesting frequency
-   - Verify vesting schedule descriptions match exactly (e.g., "1/48 monthly" vs "25% annually")
-   - Flag vesting schedule mismatches as HIGH severity
+STEP 3 - SYSTEMATIC COMPARISON:
+For EACH cap table entry, verify these 7 items in order:
+a) Does this entry have board approval? (if no = PHANTOM EQUITY)
+b) Do share quantities match?
+c) Do prices match?
+d) Do board approval dates match?
+e) Do issue dates match?
+f) Do vesting schedules match (monthly vs annual)?
+g) Are repurchases reflected?
 
-5. REPURCHASE/CANCELLATION VERIFICATION:
-   - Check if cap table reflects any share repurchases or cancellations from board documents
-   - Verify remaining share counts after repurchases
-   - Check if repurchase pricing matches original grant pricing
+STEP 4 - DISCREPANCY LIST:
+Use this EXACT format for each discrepancy:
 
-6. GRANULAR ANALYSIS REQUIRED:
-   - List each discrepancy separately (don't group multiple issues)
-   - Check dates, quantities, pricing, and math independently
-   - Be as detailed as the most thorough legal review
+DISCREPANCY #[X]: [Issue Title]
+- Severity: HIGH/MEDIUM/LOW
+- Stockholder: [Name]
+- Security ID: [ID]
+- Cap Table Shows: [Value]
+- Legal Documents Show: [Value]
+- Source Document: [Filename]
+- Description: [1-2 sentences]
 
-7. The grant date in any board consent is the last date a director signed the consent, or the explicitly written effective date.
+CRITICAL REQUIREMENTS:
+- Analyze every single cap table entry
+- Check for phantom equity (entries without board approval)
+- Verify vesting schedule language matches exactly
+- Check for missing repurchase transactions
+- List each discrepancy separately (don't group)
+- Use consistent severity: HIGH=material issues, MEDIUM=dates/documentation, LOW=minor
 
 Here are the documents to analyze:
 
@@ -112,31 +120,9 @@ BOARD DOCUMENTS:
         
         prompt += """
 
-ANALYSIS REQUIREMENTS:
+NOW EXECUTE THE 4-STEP ANALYSIS SEQUENCE ABOVE.
 
-1. DOCUMENT MAPPING: First, create a list of all board-approved grants from the legal documents
-2. CAP TABLE REVIEW: Analyze each cap table entry against this list
-3. PHANTOM EQUITY: Identify entries with no board support
-4. MATHEMATICAL VERIFICATION: Calculate and verify all vesting amounts
-5. DISCREPANCY IDENTIFICATION: List every single discrepancy found
-
-For each discrepancy, provide:
-- Discrepancy #[number]
-- Severity: HIGH/MEDIUM/LOW
-- Stockholder: [name]
-- Security ID: [ID from cap table]
-- Issue: [brief title]
-- Cap Table Shows: [specific value]
-- Legal Documents Show: [what it should be]
-- Description: [detailed explanation]
-- Source Document: [specific filename]
-
-SEVERITY GUIDELINES:
-- HIGH: Phantom equity, wrong share counts, incorrect pricing, missing repurchases, wrong vesting calculations
-- MEDIUM: Date discrepancies, documentation gaps
-- LOW: Minor formatting or non-material issues
-
-Be extremely thorough - this is for investor due diligence and every discrepancy matters. Aim to find 8-12 discrepancies if the cap table has significant issues."""
+Begin with: "STEP 1 - DOCUMENT INVENTORY:" and follow the exact sequence."""
         
         return prompt
     
@@ -149,11 +135,17 @@ Be extremely thorough - this is for investor due diligence and every discrepancy
             response = self.client.messages.create(
                 model="claude-3-5-sonnet-20241022",
                 max_tokens=4000,
-                temperature=0,
-                messages=[{
-                    "role": "user", 
-                    "content": prompt
-                }]
+                temperature=0,  # Maximum determinism
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a systematic legal auditor. Always follow the exact same analysis sequence and format. Be consistent and thorough in your approach."
+                    },
+                    {
+                        "role": "user", 
+                        "content": prompt
+                    }
+                ]
             )
             
             return response.content[0].text
@@ -265,9 +257,10 @@ def main():
             try:
                 analyzer = st.session_state.analyzer
                 
-                # Process board documents
+                # Process board documents in consistent order (alphabetical)
                 board_docs = {}
-                for file in board_files:
+                sorted_files = sorted(board_files, key=lambda x: x.name)
+                for file in sorted_files:
                     file.seek(0)  # Reset file pointer
                     content = analyzer.read_docx_content(file.read(), file.name)
                     board_docs[file.name] = content
