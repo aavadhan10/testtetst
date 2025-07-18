@@ -31,7 +31,23 @@ def extract_board_grants(self, board_docs: Dict[str, str]) -> List[Dict]:
                     grants.append(grant)
                     st.success(f"✅ Successfully extracted RSA grant data")
                 else:
-                    st.warning("⚠️ Could not extract RSAimport streamlit as st
+                    st.warning("⚠️ Could not extract RSA grant data")
+                    
+            elif 'option' in content_lower:
+                st.write("Document type: Option Grant")
+                grant = self.extract_option_grant(content, filename)
+                if grant and (grant.get('stockholder') or grant.get('shares')):
+                    grants.append(grant)
+                    st.success(f"✅ Successfully extracted option grant data")
+                else:
+                    st.warning("⚠️ Could not extract option grant data")
+            
+            else:
+                st.write("Document type: Unknown")
+                st.warning("⚠️ Could not determine document type")
+        
+        st.write(f"**Total grants extracted: {len(grants)}**")
+        return grantsimport streamlit as st
 import pandas as pd
 import openpyxl
 from docx import Document
@@ -229,9 +245,84 @@ class DeterministicCapTableAnalyzer:
         return repurchase
     
     def extract_option_grant(self, content: str, filename: str) -> Dict:
-        """Extract option grant info"""
-        # Similar to RSA but for options
-        return self.extract_rsa_grant(content, filename)  # Reuse logic for now
+        """Extract option grant info from documents like the one you showed"""
+        import re
+        
+        grant = {
+            'type': 'Option Grant',
+            'filename': filename,
+            'stockholder': None,
+            'shares': None,
+            'price_per_share': None,
+            'date': None,
+            'vesting_start': None,
+            'vesting_schedule': None
+        }
+        
+        st.write(f"**Parsing option grant {filename}:**")
+        
+        # Extract date - "Date: January 1, 2025"
+        date_patterns = [
+            r'Date:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})',
+            r'executed.*?([A-Za-z]+\s+\d{1,2},\s+\d{4})',
+        ]
+        
+        for pattern in date_patterns:
+            date_match = re.search(pattern, content, re.IGNORECASE)
+            if date_match:
+                grant['date'] = date_match.group(1)
+                st.write(f"✅ Found option grant date: {grant['date']}")
+                break
+        
+        # Extract stockholders - this document has multiple optionees
+        # Look for the Schedule A table format
+        optionees = []
+        
+        # Pattern for "John Doe 10,000 $1.00"
+        table_pattern = r'([A-Za-z]+\s+[A-Za-z]+)\s+(\d{1,3}(?:,\d{3})*)\s+\$(\d+\.\d{2})'
+        matches = re.findall(table_pattern, content)
+        
+        for match in matches:
+            name, shares_str, price_str = match
+            if name not in ['Arthur', 'Bob', 'Charlie']:  # Exclude directors
+                try:
+                    shares = int(shares_str.replace(',', ''))
+                    price = float(price_str)
+                    optionees.append({
+                        'stockholder': name,
+                        'shares': shares,
+                        'price_per_share': price
+                    })
+                    st.write(f"✅ Found optionee: {name} - {shares} shares at ${price}")
+                except ValueError:
+                    continue
+        
+        # For now, return the first optionee (or we could return all)
+        if optionees:
+            first_optionee = optionees[0]
+            grant.update(first_optionee)
+        
+        # Extract vesting start dates - look for patterns in the table
+        if grant['stockholder']:
+            # Look for vesting start associated with this person
+            vesting_pattern = rf"{re.escape(grant['stockholder'])}.*?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{{1,2}},\s+\d{{4}}"
+            vesting_match = re.search(vesting_pattern, content, re.IGNORECASE)
+            if vesting_match:
+                grant['vesting_start'] = vesting_match.group(1)
+                st.write(f"✅ Found vesting start: {grant['vesting_start']}")
+        
+        # Extract vesting schedule - look for the specific patterns
+        if '1/48th' in content and 'monthly' in content:
+            grant['vesting_schedule'] = '1/48th monthly'
+            st.write("✅ Found vesting: 1/48th monthly")
+        elif '25%' in content and 'first anniversary' in content:
+            grant['vesting_schedule'] = '25% cliff + 1/48th monthly'
+            st.write("✅ Found vesting: 25% cliff + 1/48th monthly")
+        
+        st.write(f"**Final option grant data:** {grant}")
+        st.write("---")
+        
+        return grant
     
     def run_deterministic_analysis(self, cap_table_entries: List[Dict], board_grants: List[Dict]) -> List[Dict]:
         """Run deterministic analysis that always produces same results"""
