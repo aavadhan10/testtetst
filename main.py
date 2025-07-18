@@ -311,19 +311,30 @@ class DeterministicCapTableAnalyzer:
         """Run deterministic analysis that always produces same results"""
         discrepancies = []
         
+        # Debug: Show what we extracted from board documents
+        st.write("**🔍 DEBUG: Board grants extracted:**")
+        for grant in board_grants:
+            st.write(f"- Type: {grant.get('type')}, Stockholder: {grant.get('stockholder')}, Shares: {grant.get('shares')}, File: {grant.get('filename')}")
+        
         # Create lookup of board grants by stockholder
         board_lookup = {}
         repurchases = []
         
         for grant in board_grants:
-            if grant['type'] == 'Repurchase':
+            if grant.get('type') == 'Repurchase':
                 repurchases.append(grant)
             else:
                 stockholder = grant.get('stockholder')
                 if stockholder:
-                    if stockholder not in board_lookup:
-                        board_lookup[stockholder] = []
-                    board_lookup[stockholder].append(grant)
+                    # Create flexible matching - handle name variations
+                    stockholder_key = stockholder.lower().strip()
+                    if stockholder_key not in board_lookup:
+                        board_lookup[stockholder_key] = []
+                    board_lookup[stockholder_key].append(grant)
+        
+        st.write("**🔍 DEBUG: Board lookup created:**")
+        for key, grants in board_lookup.items():
+            st.write(f"- '{key}': {len(grants)} grants")
         
         # Check each cap table entry
         for entry in cap_table_entries:
@@ -337,34 +348,72 @@ class DeterministicCapTableAnalyzer:
             # Calculate price per share
             price_per_share = cost_basis / shares if shares > 0 else 0
             
+            # Create flexible key for matching
+            stockholder_key = stockholder.lower().strip()
+            
+            st.write(f"**🔍 DEBUG: Checking cap table entry:**")
+            st.write(f"- Security ID: {security_id}")
+            st.write(f"- Stockholder: '{stockholder}' (key: '{stockholder_key}')")
+            st.write(f"- Looking for match in board_lookup...")
+            
             # Check 1: Phantom Equity (no board approval found)
-            if stockholder not in board_lookup:
-                discrepancies.append({
-                    'number': len(discrepancies) + 1,
-                    'severity': 'HIGH',
-                    'stockholder': stockholder,
-                    'security_id': security_id,
-                    'issue': 'Phantom Equity Entry',
-                    'cap_table_value': f'{shares} shares',
-                    'legal_value': 'No supporting documentation found',
-                    'description': f'Cap table shows {security_id} for {stockholder} but no board approval found',
-                    'source': 'None found'
-                })
-                continue
+            if stockholder_key not in board_lookup:
+                # Try partial matching for common name variations
+                found_match = False
+                for board_key in board_lookup.keys():
+                    # Check if names are similar (handle "John Doe" vs "John" etc.)
+                    if (stockholder_key in board_key or board_key in stockholder_key) and len(stockholder_key) > 2:
+                        st.write(f"✅ Found partial match: '{stockholder_key}' matches '{board_key}'")
+                        stockholder_key = board_key
+                        found_match = True
+                        break
+                
+                if not found_match:
+                    st.write(f"❌ No board approval found for '{stockholder_key}'")
+                    discrepancies.append({
+                        'number': len(discrepancies) + 1,
+                        'severity': 'HIGH',
+                        'stockholder': stockholder,
+                        'security_id': security_id,
+                        'issue': 'Phantom Equity Entry',
+                        'cap_table_value': f'{shares} shares',
+                        'legal_value': 'No supporting documentation found',
+                        'description': f'Cap table shows {security_id} for {stockholder} but no board approval found',
+                        'source': 'None found'
+                    })
+                    continue
+            else:
+                st.write(f"✅ Found board approval for '{stockholder_key}'")
             
             # Find matching board grant
             matching_grant = None
-            for grant in board_lookup[stockholder]:
-                if grant.get('shares') == shares or abs((grant.get('shares', 0) - shares)) <= 1:
+            grants_for_stockholder = board_lookup.get(stockholder_key, [])
+            
+            st.write(f"- Found {len(grants_for_stockholder)} grants for this stockholder")
+            
+            for grant in grants_for_stockholder:
+                grant_shares = grant.get('shares', 0)
+                st.write(f"  - Grant: {grant_shares} shares vs Cap table: {shares} shares")
+                
+                # More flexible matching - allow small differences
+                if grant_shares == shares or (grant_shares and abs(grant_shares - shares) <= 2):
                     matching_grant = grant
+                    st.write(f"  ✅ Found exact/close match")
                     break
             
-            if not matching_grant:
-                matching_grant = board_lookup[stockholder][0]  # Use first grant as fallback
+            # If no exact match, use first grant as fallback
+            if not matching_grant and grants_for_stockholder:
+                matching_grant = grants_for_stockholder[0]
+                st.write(f"  ⚠️ Using first grant as fallback")
             
-            # Check 2: Share quantity mismatch
+            if not matching_grant:
+                st.write(f"  ❌ No matching grant found")
+                continue
+            
+            # Only check for discrepancies if we have valid data
+            # Check 2: Share quantity mismatch (only if significant difference)
             board_shares = matching_grant.get('shares', 0)
-            if board_shares and abs(shares - board_shares) > 1:
+            if board_shares and abs(shares - board_shares) > 2:  # Allow small differences
                 discrepancies.append({
                     'number': len(discrepancies) + 1,
                     'severity': 'HIGH',
@@ -377,12 +426,12 @@ class DeterministicCapTableAnalyzer:
                     'source': matching_grant.get('filename', 'Unknown')
                 })
             
-            # Check 3: Price mismatch
+            # Check 3: Price mismatch (only if we have both prices)
             board_price = matching_grant.get('price_per_share', 0)
-            if board_price and abs(price_per_share - board_price) > 0.01:
+            if board_price and price_per_share and abs(price_per_share - board_price) > 0.05:  # Allow small rounding differences
                 discrepancies.append({
                     'number': len(discrepancies) + 1,
-                    'severity': 'HIGH',
+                    'severity': 'MEDIUM',  # Price differences might be less critical
                     'stockholder': stockholder,
                     'security_id': security_id,
                     'issue': 'Incorrect Price Per Share',
@@ -392,12 +441,12 @@ class DeterministicCapTableAnalyzer:
                     'source': matching_grant.get('filename', 'Unknown')
                 })
             
-            # Check 4: Board approval date mismatch
+            # Check 4: Board approval date mismatch (only if we have both dates)
             board_date = matching_grant.get('date', '')
-            if board_date and board_date not in board_approval_date:
+            if board_date and board_approval_date and board_date not in board_approval_date and board_approval_date not in board_date:
                 discrepancies.append({
                     'number': len(discrepancies) + 1,
-                    'severity': 'HIGH',
+                    'severity': 'MEDIUM',
                     'stockholder': stockholder,
                     'security_id': security_id,
                     'issue': 'Incorrect Board Approval Date',
@@ -407,14 +456,14 @@ class DeterministicCapTableAnalyzer:
                     'source': matching_grant.get('filename', 'Unknown')
                 })
             
-            # Check 5: Vesting schedule mismatch
+            # Check 5: Vesting schedule mismatch (only if we have both schedules)
             board_vesting = matching_grant.get('vesting_schedule', '')
-            if board_vesting and board_vesting not in vesting_schedule:
+            if board_vesting and vesting_schedule and board_vesting not in vesting_schedule:
                 if ('monthly' in board_vesting.lower() and 'monthly' not in vesting_schedule.lower()) or \
                    ('annual' in board_vesting.lower() and 'annual' not in vesting_schedule.lower()):
                     discrepancies.append({
                         'number': len(discrepancies) + 1,
-                        'severity': 'HIGH',
+                        'severity': 'LOW',  # Vesting format differences might be presentation only
                         'stockholder': stockholder,
                         'security_id': security_id,
                         'issue': 'Vesting Schedule Mismatch',
@@ -424,7 +473,7 @@ class DeterministicCapTableAnalyzer:
                         'source': matching_grant.get('filename', 'Unknown')
                     })
         
-        # Check 6: Missing repurchase transactions
+        # Check 6: Missing repurchase transactions (only if repurchases were actually found)
         for repurchase in repurchases:
             stockholder = repurchase.get('stockholder')
             shares_repurchased = repurchase.get('shares_repurchased', 0)
@@ -442,6 +491,7 @@ class DeterministicCapTableAnalyzer:
                     'source': repurchase.get('filename', 'Unknown')
                 })
         
+        st.write(f"**🔍 DEBUG: Final result - {len(discrepancies)} discrepancies found**")
         return discrepancies
     
     def safe_int(self, value) -> int:
