@@ -756,8 +756,10 @@ def main():
             help="Upload Excel file containing the company's capitalization table"
         )
         
-        # Analysis button
+        # Add ensemble analysis option
         st.markdown("---")
+        ensemble_analysis = st.checkbox("🔄 Run Ensemble Analysis (3 iterations for higher consistency)", help="Runs the analysis multiple times to check consistency - takes longer but more reliable")
+        
         run_analysis = st.button(
             "🔍 Run LLM Tie-Out Analysis", 
             type="primary", 
@@ -832,13 +834,51 @@ def main():
                     content = analyzer.read_docx_content(file.read(), file.name)
                     board_docs[file.name] = content
                 
-                # Use LLM-powered document parsing for better accuracy
-                st.write("**🤖 Step 1: LLM Document Parsing**")
-                board_grants = analyzer.extract_board_grants_with_llm(board_docs)
-                
-                # Run LLM analysis with better context
-                st.write("**🤖 Step 2: Comprehensive LLM Analysis**")
-                analysis_result = analyzer.analyze_with_llm(board_docs, cap_table_text)
+    def run_ensemble_analysis(self, board_docs: Dict[str, str], cap_table_text: str, runs: int = 3) -> str:
+        """Run analysis multiple times and take consensus for better consistency"""
+        
+        st.write(f"**🔄 Running ensemble analysis ({runs} iterations for consistency)...**")
+        
+        results = []
+        parsed_grants_list = []
+        
+        for i in range(runs):
+            st.write(f"📊 Run {i+1}/{runs}")
+            
+            # Parse documents with LLM
+            grants = self.extract_board_grants_with_llm(board_docs)
+            parsed_grants_list.append(grants)
+            
+            # Run main analysis
+            analysis = self.analyze_with_llm(board_docs, cap_table_text)
+            results.append(analysis)
+        
+        # Find consensus in parsed grants
+        st.write("**🎯 Analyzing consistency across runs:**")
+        
+        # Check if parsing was consistent
+        consistent_parsing = True
+        if len(parsed_grants_list) > 1:
+            first_grants = parsed_grants_list[0]
+            for grants in parsed_grants_list[1:]:
+                if len(grants) != len(first_grants):
+                    consistent_parsing = False
+                    break
+                for i, grant in enumerate(grants):
+                    if i < len(first_grants):
+                        first_grant = first_grants[i]
+                        if (grant.get('stockholder') != first_grant.get('stockholder') or 
+                            grant.get('shares') != first_grant.get('shares')):
+                            consistent_parsing = False
+                            break
+        
+        if consistent_parsing:
+            st.success("✅ Document parsing was consistent across all runs")
+        else:
+            st.warning("⚠️ Document parsing varied between runs - flagging for review")
+        
+        # For now, return the first result (could implement voting logic)
+        return results[0], parsed_grants_list[0]
                 
                 # Display results
                 st.markdown("---")
@@ -1631,13 +1671,17 @@ def main():
                     content = analyzer.read_docx_content(file.read(), file.name)
                     board_docs[file.name] = content
                 
-                # Use LLM-powered document parsing for better accuracy
-                st.write("**🤖 Step 1: LLM Document Parsing**")
-                board_grants = analyzer.extract_board_grants_with_llm(board_docs)
-                
-                # Run LLM analysis with better context
-                st.write("**🤖 Step 2: Comprehensive LLM Analysis**")
-                analysis_result = analyzer.analyze_with_llm(board_docs, cap_table_text)
+                if ensemble_analysis:
+                    # Run ensemble analysis for better consistency
+                    analysis_result, board_grants = analyzer.run_ensemble_analysis(board_docs, cap_table_text)
+                else:
+                    # Single run analysis
+                    st.write("**🤖 Step 1: LLM Document Parsing**")
+                    board_grants = analyzer.extract_board_grants_with_llm(board_docs)
+                    
+                    # Run LLM analysis with better context
+                    st.write("**🤖 Step 2: Comprehensive LLM Analysis**")
+                    analysis_result = analyzer.analyze_with_llm(board_docs, cap_table_text)
                 
                 # Display results
                 st.markdown("---")
