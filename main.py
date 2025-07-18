@@ -308,25 +308,132 @@ class DeterministicCapTableAnalyzer:
         return self.extract_rsa_grant(content, filename)  # Reuse logic for now
     
     def run_deterministic_analysis(self, cap_table_entries: List[Dict], board_grants: List[Dict]) -> List[Dict]:
-        """Run simple analysis - let the LLM do the heavy lifting"""
-        # Don't try to be too smart here - just do basic validation
-        # The LLM analysis is what really works
-        
+        """Run focused analysis to catch specific discrepancies"""
         discrepancies = []
         
-        # Simple check: if we have cap table entries but no board grants extracted
-        if cap_table_entries and not board_grants:
-            discrepancies.append({
-                'number': 1,
-                'severity': 'HIGH',
-                'stockholder': 'All entries',
-                'security_id': 'All',
-                'issue': 'No Board Documents Parsed',
-                'cap_table_value': f'{len(cap_table_entries)} cap table entries',
-                'legal_value': 'No board grants extracted',
-                'description': 'Cap table has entries but no board grants were successfully extracted from documents',
-                'source': 'Document parsing'
-            })
+        if not cap_table_entries:
+            return discrepancies
+            
+        # Create a simple lookup of board-approved stockholders
+        board_stockholders = set()
+        board_data = {}  # stockholder -> grant details
+        
+        for grant in board_grants:
+            stockholder = grant.get('stockholder')
+            if stockholder:
+                # Normalize name for matching
+                norm_name = stockholder.lower().strip()
+                board_stockholders.add(norm_name)
+                if norm_name not in board_data:
+                    board_data[norm_name] = []
+                board_data[norm_name].append(grant)
+        
+        # Check each cap table entry
+        for entry in cap_table_entries:
+            security_id = entry.get('Security ID', '')
+            stockholder = entry.get('Stakeholder Name', '')
+            shares = self.safe_int(entry.get('Quantity Issued', 0))
+            cost_basis = self.safe_float(entry.get('Cost Basis', 0))
+            
+            if not stockholder or not security_id:
+                continue
+                
+            norm_stockholder = stockholder.lower().strip()
+            price_per_share = cost_basis / shares if shares > 0 else 0
+            
+            # Check 1: Look for stockholders in cap table but not in board docs
+            found_board_match = False
+            matching_grants = []
+            
+            # Direct match
+            if norm_stockholder in board_stockholders:
+                found_board_match = True
+                matching_grants = board_data[norm_stockholder]
+            else:
+                # Try partial matching for name variations
+                for board_name in board_stockholders:
+                    if (norm_stockholder in board_name or board_name in norm_stockholder) and len(norm_stockholder) > 3:
+                        found_board_match = True
+                        matching_grants = board_data[board_name]
+                        break
+            
+            if not found_board_match:
+                discrepancies.append({
+                    'number': len(discrepancies) + 1,
+                    'severity': 'HIGH',
+                    'stockholder': stockholder,
+                    'security_id': security_id,
+                    'issue': 'Phantom Equity Entry',
+                    'cap_table_value': f'{shares} shares at ${price_per_share:.2f}',
+                    'legal_value': 'No board approval found',
+                    'description': f'Cap table shows {security_id} for {stockholder} but no corresponding board approval was found',
+                    'source': 'None found'
+                })
+                continue
+            
+            # Check 2: Share quantity discrepancies
+            if matching_grants:
+                best_match = None
+                min_diff = float('inf')
+                
+                for grant in matching_grants:
+                    grant_shares = grant.get('shares', 0)
+                    if grant_shares:
+                        diff = abs(shares - grant_shares)
+                        if diff < min_diff:
+                            min_diff = diff
+                            best_match = grant
+                
+                if best_match:
+                    board_shares = best_match.get('shares', 0)
+                    board_price = best_match.get('price_per_share', 0)
+                    
+                    # Significant share count difference
+                    if board_shares and abs(shares - board_shares) > 5:  # Allow some tolerance
+                        discrepancies.append({
+                            'number': len(discrepancies) + 1,
+                            'severity': 'HIGH',
+                            'stockholder': stockholder,
+                            'security_id': security_id,
+                            'issue': 'Share Quantity Mismatch',
+                            'cap_table_value': f'{shares} shares',
+                            'legal_value': f'{board_shares} shares',
+                            'description': f'Cap table shows {shares} shares but board approval is for {board_shares} shares',
+                            'source': best_match.get('filename', 'Unknown')
+                        })
+                    
+                    # Price per share discrepancy
+                    if board_price and price_per_share and abs(price_per_share - board_price) > 0.10:  # $0.10 tolerance
+                        discrepancies.append({
+                            'number': len(discrepancies) + 1,
+                            'severity': 'MEDIUM',
+                            'stockholder': stockholder,
+                            'security_id': security_id,
+                            'issue': 'Price Per Share Mismatch',
+                            'cap_table_value': f'${price_per_share:.2f}',
+                            'legal_value': f'${board_price:.2f}',
+                            'description': f'Cap table shows ${price_per_share:.2f} per share but board approval shows ${board_price:.2f}',
+                            'source': best_match.get('filename', 'Unknown')
+                        })
+        
+        # Check 3: Look for repurchases that should reduce cap table
+        for grant in board_grants:
+            if grant.get('type') == 'Repurchase':
+                repurchase_stockholder = grant.get('stockholder')
+                repurchased_shares = grant.get('shares_repurchased', 0)
+                
+                if repurchase_stockholder and repurchased_shares:
+                    discrepancies.append({
+                        'number': len(discrepancies) + 1,
+                        'severity': 'HIGH',
+                        'stockholder': repurchase_stockholder,
+                        'security_id': 'Multiple',
+                        'issue': 'Missing Repurchase Transaction',
+                        'cap_table_value': 'No reduction shown',
+                        'legal_value': f'{repurchased_shares} shares repurchased',
+                        'description': f'Board approved repurchase of {repurchased_shares} shares from {repurchase_stockholder} but cap table may not reflect this',
+                        'source': grant.get('filename', 'Unknown')
+                    })
         
         return discrepancies
     
@@ -592,16 +699,60 @@ def main():
                 st.markdown("### 📋 Detailed Analysis")
                 st.markdown(analysis_result)
                 
-                # Also run simple validation for basic checks
+                # Also run focused validation to catch specific discrepancies
                 cap_table_file.seek(0)
                 cap_table_entries = analyzer.excel_to_structured_data(cap_table_file.read(), cap_table_file.name)
                 board_grants = analyzer.extract_board_grants(board_docs)
-                simple_checks = analyzer.run_deterministic_analysis(cap_table_entries, board_grants)
+                additional_discrepancies = analyzer.run_deterministic_analysis(cap_table_entries, board_grants)
                 
-                if simple_checks:
-                    st.markdown("### ⚠️ Additional Technical Issues")
-                    for check in simple_checks:
-                        st.warning(f"{check['issue']}: {check['description']}")
+                if additional_discrepancies:
+                    st.markdown("### 🔍 Additional Discrepancies Found")
+                    st.info(f"Found {len(additional_discrepancies)} additional discrepancies through systematic analysis")
+                    
+                    # Show summary metrics
+                    high_count = len([d for d in additional_discrepancies if d['severity'] == 'HIGH'])
+                    medium_count = len([d for d in additional_discrepancies if d['severity'] == 'MEDIUM'])
+                    low_count = len([d for d in additional_discrepancies if d['severity'] == 'LOW'])
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("🔴 High Priority", high_count)
+                    with col2:
+                        st.metric("🟡 Medium Priority", medium_count)
+                    with col3:
+                        st.metric("🟢 Low Priority", low_count)
+                    
+                    # Show each discrepancy
+                    for disc in additional_discrepancies:
+                        severity_colors = {'HIGH': '#ff4444', 'MEDIUM': '#ffaa00', 'LOW': '#00aa00'}
+                        severity_emojis = {'HIGH': '🔴', 'MEDIUM': '🟡', 'LOW': '🟢'}
+                        
+                        with st.expander(f"{severity_emojis[disc['severity']]} {disc['issue']} - {disc['stockholder']}", expanded=disc['severity']=='HIGH'):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.markdown("**Cap Table Shows:**")
+                                st.code(disc['cap_table_value'])
+                                st.markdown("**Security ID:**")
+                                st.code(disc['security_id'])
+                            with col2:
+                                st.markdown("**Legal Documents Show:**")
+                                st.code(disc['legal_value'])
+                                st.markdown("**Source:**")
+                                st.code(disc['source'])
+                            st.markdown("**Description:**")
+                            st.write(disc['description'])
+                    
+                    # Add to downloadable report
+                    additional_report = "\n\nADDITIONAL SYSTEMATIC DISCREPANCIES:\n"
+                    for i, disc in enumerate(additional_discrepancies, 1):
+                        additional_report += f"\n{i}. {disc['issue']} - {disc['stockholder']}\n"
+                        additional_report += f"   Severity: {disc['severity']}\n"
+                        additional_report += f"   Cap Table: {disc['cap_table_value']}\n"
+                        additional_report += f"   Legal Docs: {disc['legal_value']}\n"
+                        additional_report += f"   Description: {disc['description']}\n"
+                        additional_report += f"   Source: {disc['source']}\n"
+                    
+                    report_text += additional_report
                 
                 # Create downloadable report
                 st.markdown("---")
