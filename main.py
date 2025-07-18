@@ -136,11 +136,8 @@ Begin with: "STEP 1 - DOCUMENT INVENTORY:" and follow the exact sequence."""
                 model="claude-3-5-sonnet-20241022",
                 max_tokens=4000,
                 temperature=0,  # Maximum determinism
+                system="You are a systematic legal auditor. Always follow the exact same analysis sequence and format. Be consistent and thorough in your approach.",
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a systematic legal auditor. Always follow the exact same analysis sequence and format. Be consistent and thorough in your approach."
-                    },
                     {
                         "role": "user", 
                         "content": prompt
